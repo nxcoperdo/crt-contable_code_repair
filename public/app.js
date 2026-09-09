@@ -16,6 +16,14 @@ const nombreMes = (m) => {
   const d = new Date(m + '-01T12:00:00');
   return d.toLocaleDateString('es-CO', { month: 'long', year: 'numeric' });
 };
+// porcentaje con hasta 1 decimal, coma decimal (es-CO). pct1(40) -> "40", pct1(66.666) -> "66,7"
+const pct1 = (n) => {
+  const r = Math.round((Number(n) || 0) * 10) / 10;
+  return (Number.isInteger(r) ? String(r) : r.toFixed(1)).replace('.', ',');
+};
+// margen de ganancia = sobre el precio de venta;  rentabilidad = sobre el costo
+const margenSobreVenta = (venta, costo) => (venta > 0 ? ((venta - costo) / venta) * 100 : 0);
+const margenSobreCosto = (venta, costo) => (costo > 0 ? ((venta - costo) / costo) * 100 : 0);
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 function aviso(texto) {
@@ -24,6 +32,28 @@ function aviso(texto) {
   el.hidden = false;
   clearTimeout(aviso.t);
   aviso.t = setTimeout(() => (el.hidden = true), 2600);
+}
+
+const sinMovimiento = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// Cuenta ascendente para los elementos [data-contar] recién pintados.
+function animarCifras(root) {
+  if (sinMovimiento()) return;
+  root.querySelectorAll('[data-contar]').forEach((el) => {
+    const fin = Number(el.dataset.contar) || 0;
+    if (!fin) return;
+    const texto = el.textContent;
+    const ini = performance.now();
+    const dur = 650;
+    const paso = (t) => {
+      const k = Math.min(1, (t - ini) / dur);
+      const e = 1 - Math.pow(1 - k, 3);
+      el.textContent = pesos(fin * e);
+      if (k < 1) requestAnimationFrame(paso);
+      else el.textContent = texto;
+    };
+    requestAnimationFrame(paso);
+  });
 }
 
 async function api(metodo, ruta, cuerpo) {
@@ -222,29 +252,48 @@ async function borrar(tabla, id) {
 /* --------------------------------- gráfica -------------------------------- */
 
 function graficaUtilidad(serie) {
-  const w = 700, h = 200, padX = 26, padY = 18;
+  const w = 700, h = 220, padX = 30, padY = 22;
   const max = Math.max(1, ...serie.map((s) => Math.max(Math.abs(s.utilidad), s.ingresos)));
   const anchoCol = (w - padX * 2) / serie.length;
-  const cero = padY + (h - padY * 2) * (max / (max * 2));
+  const cero = padY + (h - padY * 2) * 0.5;
   const escala = (v) => ((h - padY * 2) / 2) * (v / max);
 
-  const barras = serie
-    .map((s, i) => {
-      const x = padX + i * anchoCol + anchoCol * 0.22;
-      const ancho = anchoCol * 0.56;
-      const alto = Math.max(1, Math.abs(escala(s.utilidad)));
-      const y = s.utilidad >= 0 ? cero - alto : cero;
-      const color = s.utilidad >= 0 ? 'var(--verde)' : 'var(--rojo)';
-      const etiqueta = new Date(s.mes + '-01T12:00:00').toLocaleDateString('es-CO', { month: 'short' }).replace('.', '');
-      return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${ancho.toFixed(1)}" height="${alto.toFixed(1)}" rx="2" fill="${color}"><title>${etiqueta} ${pesos(s.utilidad)}</title></rect>
-        <text x="${(x + ancho / 2).toFixed(1)}" y="${h - 3}" text-anchor="middle">${etiqueta}</text>`;
+  const semialto = (h - padY * 2) / 2;
+  const rejilla = [1, 0.5, -0.5, -1]
+    .map((f) => {
+      const y = (cero - semialto * f).toFixed(1);
+      return `<line class="rejilla" x1="${padX}" y1="${y}" x2="${w - padX}" y2="${y}"/>`;
     })
     .join('');
 
-  return `<svg class="grafica" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img" aria-label="Utilidad de los últimos 12 meses">
-    <line x1="${padX}" y1="${cero}" x2="${w - padX}" y2="${cero}" stroke="var(--borde)" stroke-width="1"/>
-    <text x="2" y="${cero - 4}">${corto(max)}</text>
-    <text x="2" y="${cero + 12}">-${corto(max)}</text>
+  const barras = serie
+    .map((s, i) => {
+      const x = padX + i * anchoCol + anchoCol * 0.2;
+      const ancho = anchoCol * 0.6;
+      const alto = Math.max(2, Math.abs(escala(s.utilidad)));
+      const y = s.utilidad >= 0 ? cero - alto : cero;
+      const grad = s.utilidad >= 0 ? 'url(#gUp)' : 'url(#gDown)';
+      const etiqueta = new Date(s.mes + '-01T12:00:00').toLocaleDateString('es-CO', { month: 'short' }).replace('.', '');
+      return `<rect class="barra" style="--i:${i}" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${ancho.toFixed(1)}" height="${alto.toFixed(1)}" rx="3" fill="${grad}"><title>${etiqueta} ${pesos(s.utilidad)}</title></rect>
+        <text x="${(x + ancho / 2).toFixed(1)}" y="${h - 4}" text-anchor="middle">${etiqueta}</text>`;
+    })
+    .join('');
+
+  return `<svg class="grafica" viewBox="0 0 ${w} ${h}" role="img" aria-label="Utilidad de los últimos 12 meses">
+    <defs>
+      <linearGradient id="gUp" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" style="stop-color:var(--verde);stop-opacity:1"/>
+        <stop offset="1" style="stop-color:var(--verde);stop-opacity:.4"/>
+      </linearGradient>
+      <linearGradient id="gDown" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" style="stop-color:var(--rojo);stop-opacity:.45"/>
+        <stop offset="1" style="stop-color:var(--rojo);stop-opacity:1"/>
+      </linearGradient>
+    </defs>
+    ${rejilla}
+    <line class="eje" x1="${padX}" y1="${cero}" x2="${w - padX}" y2="${cero}"/>
+    <text x="4" y="${cero - 6}">${corto(max)}</text>
+    <text x="4" y="${cero + 14}">-${corto(max)}</text>
     ${barras}
   </svg>`;
 }
@@ -271,7 +320,9 @@ async function vistaPanel() {
               <span style="width:${(l.ingresos / maxLinea) * 100}%;background:${esc(l.color)}"></span>
             </div>
             <div class="linea-datos num">
-              <span>Entró ${pesos(l.ingresos)}</span><span>Gastó ${pesos(l.gastos)}</span><span>${l.pct}% margen</span>
+              <span>Entró ${pesos(l.ingresos)}</span><span>Gastó ${pesos(l.gastos)}</span><span>${
+                l.gastos > 0 ? `${l.pct}% margen` : l.ingresos > 0 ? 'sin costos cargados' : '—'
+              }</span>
             </div>
           </div>`
         )
@@ -313,7 +364,7 @@ async function vistaPanel() {
         <span class="utilidad-etiqueta">Utilidad neta · ${esc(nombreMes(estado.mes))}</span>
         <input class="mes-select" type="month" id="mes" value="${estado.mes}">
       </div>
-      <p class="utilidad-cifra num ${u.utilidad >= 0 ? 'positiva' : 'negativa'}">${pesos(u.utilidad)}</p>
+      <p class="utilidad-cifra num ${u.utilidad >= 0 ? 'positiva' : 'negativa'}" data-contar="${u.utilidad}">${pesos(u.utilidad)}</p>
       <p class="sub num">${dif >= 0 ? '+' : ''}${pesos(dif)} frente a ${esc(nombreMes(d.previo.mes))}</p>
       <div class="balanza">
         <div class="balanza-fila"><span>Entró</span><span class="balanza-pista"><span class="balanza-barra" style="width:${(u.ingresos / total) * 100}%;background:var(--verde)"></span></span><strong class="num">${pesos(u.ingresos)}</strong></div>
@@ -322,7 +373,7 @@ async function vistaPanel() {
     </div>
 
     <div class="bloque">
-      <div class="bloque-titulo"><h2>Rentabilidad por producto</h2><span class="sub">este mes</span></div>
+      <div class="bloque-titulo"><h2>Rentabilidad por línea</h2><span class="sub">este mes</span></div>
       ${lineasHtml}
     </div>
 
@@ -449,7 +500,7 @@ async function vistaVentas() {
     ${filtrosHtml()}
     <div class="bloque">
       <div class="bloque-titulo"><h2>Ventas de ${esc(nombreMes(estado.mes))}</h2><strong class="num">${pesos(total)}</strong></div>
-      <p class="sub num">Margen sobre costo: ${pesos(margen)}</p>
+      <p class="sub num">Ganancia bruta: ${pesos(margen)}${total ? ` · margen ${pct1((margen / total) * 100)}% sobre venta` : ''}</p>
       <div class="filtros"><button class="btn-linea" id="btn-venta">Registrar venta</button></div>
       <div class="filas">${
         filas.length
@@ -482,7 +533,7 @@ async function vistaInventario() {
                 (p) => `<div class="fila">
                   <span class="fila-principal">${esc(p.nombre)}</span>
                   <span class="fila-monto num">${p.stock} <span class="sub">u.</span></span>
-                  <span class="fila-detalle num">Costo ${pesos(p.costo_unitario)} · venta ${pesos(p.precio_venta)} · margen ${pesos(p.precio_venta - p.costo_unitario)} ${p.stock <= p.stock_minimo ? '<span class="marca-estado estado-alerta">bajo</span>' : ''}</span>
+                  <span class="fila-detalle num">Costo ${pesos(p.costo_unitario)} · venta ${pesos(p.precio_venta)} · margen ${pesos(p.precio_venta - p.costo_unitario)} (${pct1(margenSobreVenta(p.precio_venta, p.costo_unitario))}% s/venta · ${pct1(margenSobreCosto(p.precio_venta, p.costo_unitario))}% s/costo) ${p.stock <= p.stock_minimo ? '<span class="marca-estado estado-alerta">bajo</span>' : ''}</span>
                   <span class="fila-acciones">
                     <button class="btn-mini" data-entrada="${p.id}">Entrada</button>
                     <button class="btn-mini" data-editar="productos:${p.id}">Editar</button>
@@ -564,7 +615,7 @@ async function vistaReportes() {
           (l) => `<div class="fila">
             <span class="fila-principal">${esc(l.nombre)}</span>
             <span class="fila-monto num ${l.margen >= 0 ? 'monto-positivo' : 'monto-negativo'}">${pesos(l.margen)}</span>
-            <span class="fila-detalle num">Entró ${pesos(l.ingresos)} · gastó ${pesos(l.gastos)} · por cobrar ${pesos(l.por_cobrar)} · ${l.pct}%</span>
+            <span class="fila-detalle num">Entró ${pesos(l.ingresos)} · gastó ${pesos(l.gastos)} · por cobrar ${pesos(l.por_cobrar)}${l.gastos > 0 ? ` · ${l.pct}% margen` : ''}</span>
           </div>`
         )
         .join('')}</div>
@@ -593,7 +644,7 @@ async function vistaReportes() {
               .map(
                 (p) => `<div class="fila"><span class="fila-principal">${esc(p.nombre)}</span>
                   <span class="fila-monto num">${pesos(p.facturado)}</span>
-                  <span class="fila-detalle num">${p.vendidos} vendidos · margen ${pesos(p.margen)} · quedan ${p.stock}</span></div>`
+                  <span class="fila-detalle num">${p.vendidos} vendidos · margen ${pesos(p.margen)}${p.facturado ? ` (${pct1((p.margen / p.facturado) * 100)}%)` : ''} · quedan ${p.stock}</span></div>`
               )
               .join('')
           : '<p class="vacio">Sin productos registrados.</p>'
@@ -646,6 +697,7 @@ async function render() {
   const cont = $('#vista');
   try {
     cont.innerHTML = await (VISTA_FN[estado.vista] || vistaPanel)();
+    animarCifras(cont);
   } catch (e) {
     cont.innerHTML = `<div class="bloque"><p class="error">${esc(e.message)}</p></div>`;
   }
@@ -761,6 +813,19 @@ $('#in-clave').addEventListener('keydown', (e) => e.key === 'Enter' && $('#btn-e
 $('#btn-salir').onclick = async () => {
   await fetch('/api/logout', { method: 'POST' });
   location.reload();
+};
+
+function temaActual() {
+  return document.documentElement.dataset.tema === 'claro' ? 'claro' : 'oscuro';
+}
+$('#btn-tema').onclick = () => {
+  const nuevo = temaActual() === 'oscuro' ? 'claro' : 'oscuro';
+  document.documentElement.dataset.tema = nuevo;
+  try {
+    localStorage.setItem('tema', nuevo);
+  } catch (e) {}
+  const meta = $('#meta-tema');
+  if (meta) meta.content = nuevo === 'claro' ? '#EEF2F7' : '#080B11';
 };
 
 $('#btn-cuenta').onclick = () =>
