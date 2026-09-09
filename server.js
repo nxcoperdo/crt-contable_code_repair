@@ -348,6 +348,7 @@ app.get('/api/movimientos', (req, res) =>
 app.post('/api/ventas/registrar', (req, res) =>
   ok(res, () => {
     const b = req.body || {};
+    revisarComunes(b);
     const cantidad = entero(b.cantidad) || 1;
     const fecha = b.fecha || hoy();
     const p = b.producto_id ? db.prepare('SELECT * FROM productos WHERE id = ?').get(entero(b.producto_id)) : null;

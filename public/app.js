@@ -495,24 +495,27 @@ async function vistaSuscripciones() {
 async function vistaVentas() {
   const filas = await api('GET', `/ventas?mes=${estado.mes}`);
   const total = filas.reduce((a, b) => a + b.total, 0);
-  const margen = filas.reduce((a, b) => a + (b.precio_unitario - b.costo_unitario) * b.cantidad, 0);
+  const costoTotal = filas.reduce((a, b) => a + b.costo_unitario * b.cantidad, 0);
+  const margen = total - costoTotal;
   return `
     ${filtrosHtml()}
     <div class="bloque">
       <div class="bloque-titulo"><h2>Ventas de ${esc(nombreMes(estado.mes))}</h2><strong class="num">${pesos(total)}</strong></div>
-      <p class="sub num">Ganancia bruta: ${pesos(margen)}${total ? ` · margen ${pct1((margen / total) * 100)}% sobre venta` : ''}</p>
+      <p class="sub num">Costo ${pesos(costoTotal)} · Utilidad <b class="${margen >= 0 ? 'monto-positivo' : 'monto-negativo'}">${pesos(margen)}</b>${total ? ` · margen ${pct1((margen / total) * 100)}% sobre venta` : ''}</p>
       <div class="filtros"><button class="btn-linea" id="btn-venta">Registrar venta</button></div>
       <div class="filas">${
         filas.length
           ? filas
-              .map(
-                (f) => `<div class="fila">
-                  <span class="fila-principal">${f.cantidad} x ${esc(nombreProducto(f.producto_id) || 'producto')}</span>
+              .map((f) => {
+                const util = (f.precio_unitario - f.costo_unitario) * f.cantidad;
+                return `<div class="fila">
+                  <span class="fila-principal">${f.cantidad} × ${esc(nombreProducto(f.producto_id) || 'producto')}</span>
                   <span class="fila-monto num">${pesos(f.total)}</span>
                   <span class="fila-detalle">${esc(f.fecha)} · ${esc(nombreCliente(f.cliente_id) || 'mostrador')} · ${esc(f.metodo)} <span class="marca-estado estado-${f.estado}">${f.estado === 'pagado' ? 'pagada' : 'por cobrar'}</span></span>
+                  <span class="fila-detalle num" style="grid-column:1/-1">Costo unit. ${pesos(f.costo_unitario)} · Venta unit. ${pesos(f.precio_unitario)} · Utilidad <b class="${util >= 0 ? 'monto-positivo' : 'monto-negativo'}">${pesos(util)}</b>${f.precio_unitario ? ` · ${pct1(margenSobreVenta(f.precio_unitario, f.costo_unitario))}% margen` : ''}</span>
                   <span class="fila-acciones"><button class="btn-mini" data-borrar="ventas:${f.id}">Borrar</button></span>
-                </div>`
-              )
+                </div>`;
+              })
               .join('')
           : '<p class="vacio">Sin ventas físicas este mes.</p>'
       }</div>
@@ -722,7 +725,8 @@ function formularioVenta() {
       { k: 'fecha', l: 'Fecha', t: 'date', def: hoy() },
       { k: 'producto_id', l: 'Producto', t: 'select', opts: opcionesProducto, req: true },
       { k: 'cantidad', l: 'Cantidad', t: 'number', def: 1, req: true },
-      { k: 'precio_unitario', l: 'Precio unitario', t: 'number' },
+      { k: 'precio_unitario', l: 'Precio de venta unit.', t: 'number' },
+      { k: 'costo_unitario', l: 'Costo unit. (vacío = del producto)', t: 'number' },
       { k: 'cliente_id', l: 'Cliente', t: 'select', opts: opcionesCliente },
       { k: 'metodo', l: 'Método', t: 'select', opts: () => METODOS, def: 'efectivo' },
       { k: 'estado', l: 'Estado', t: 'select', opts: () => [{ v: 'pagado', t: 'Pagada' }, { v: 'pendiente', t: 'Por cobrar' }], def: 'pagado' },
