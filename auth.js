@@ -11,6 +11,35 @@ const SECRET =
 
 const DIAS = 30;
 
+/* --------------------- límite de intentos de login ---------------------- */
+
+const MAX_INTENTOS = 5;
+const BLOQUEO_MS = 15 * 60 * 1000;
+const intentos = new Map(); // ip -> { n, hasta }
+
+function loginPermitido(ip) {
+  const r = intentos.get(ip);
+  if (r && r.hasta && r.hasta > Date.now()) {
+    return { ok: false, esperaSegundos: Math.ceil((r.hasta - Date.now()) / 1000) };
+  }
+  return { ok: true };
+}
+
+function loginFallido(ip) {
+  const r = intentos.get(ip) || { n: 0, hasta: 0 };
+  r.n += 1;
+  if (r.n >= MAX_INTENTOS) {
+    r.hasta = Date.now() + BLOQUEO_MS;
+    r.n = 0;
+  }
+  intentos.set(ip, r);
+  if (intentos.size > 5000) intentos.clear(); // tope de memoria
+}
+
+function loginOk(ip) {
+  intentos.delete(ip);
+}
+
 function hashPass(pass, salt) {
   return crypto.scryptSync(pass, salt, 64).toString('hex');
 }
@@ -20,6 +49,14 @@ function crearUsuario(usuario, pass) {
   db.prepare(
     `INSERT INTO usuarios (usuario, hash, salt, creado) VALUES (?, ?, ?, datetime('now'))`
   ).run(usuario, hashPass(pass, salt), salt);
+}
+
+function cambiarClave(usuario, actual, nueva) {
+  const u = verificar(usuario, actual);
+  if (!u) throw new Error('La clave actual no coincide.');
+  if (!nueva || String(nueva).length < 8) throw new Error('La clave nueva debe tener al menos 8 caracteres.');
+  const salt = crypto.randomBytes(16).toString('hex');
+  db.prepare('UPDATE usuarios SET hash = ?, salt = ? WHERE id = ?').run(hashPass(nueva, salt), salt, u.id);
 }
 
 function verificar(usuario, pass) {
@@ -91,4 +128,7 @@ function asegurarAdmin() {
   console.log(`[crt] Usuario inicial creado: ${usuario}`);
 }
 
-module.exports = { verificar, darSesion, cerrarSesion, requiereSesion, asegurarAdmin, crearUsuario, cookies, abrir };
+module.exports = {
+  verificar, darSesion, cerrarSesion, requiereSesion, asegurarAdmin, crearUsuario, cookies, abrir,
+  loginPermitido, loginFallido, loginOk, cambiarClave,
+};

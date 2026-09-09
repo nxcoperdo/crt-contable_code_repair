@@ -32,7 +32,7 @@ async function api(metodo, ruta, cuerpo) {
     headers: cuerpo ? { 'Content-Type': 'application/json' } : {},
     body: cuerpo ? JSON.stringify(cuerpo) : undefined,
   });
-  if (r.status === 401) {
+  if (r.status === 401 && ruta !== '/login') {
     estado.usuario = null;
     mostrarEntrada();
     throw new Error('Sesión expirada');
@@ -762,6 +762,18 @@ $('#btn-salir').onclick = async () => {
   await fetch('/api/logout', { method: 'POST' });
   location.reload();
 };
+
+$('#btn-cuenta').onclick = () =>
+  abrirFormulario({
+    titulo: 'Cambiar contraseña',
+    campos: [
+      { k: 'actual', l: 'Clave actual', t: 'password', req: true, ancho: true },
+      { k: 'nueva', l: 'Clave nueva (mínimo 8)', t: 'password', req: true, ancho: true },
+    ],
+    alGuardar: async (d) => {
+      await api('POST', '/cuenta/clave', d);
+    },
+  });
 
 $('#modal-cerrar').onclick = cerrarFormulario;
 $('#modal-guardar').onclick = guardarFormulario;

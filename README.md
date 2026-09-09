@@ -70,25 +70,42 @@ Después de tener HTTPS, arranca con `NODE_ENV=production` para que la cookie vi
 
 ## Cobros automáticos
 
-Para que las suscripciones vencidas se conviertan solas en cuentas por cobrar, un cron diario:
+Para que las suscripciones vencidas se conviertan solas en cuentas por cobrar, define
+`CRON_SECRET` (otro `openssl rand -hex 32`) y programa un cron diario:
 
 ```bash
 crontab -e
 # todos los días 7am
-0 7 * * * curl -s -X POST http://127.0.0.1:4300/api/suscripciones/generar-vencidas -H 'Cookie: crt_sesion=TU_TOKEN' > /dev/null
+0 7 * * * curl -s -X POST "http://127.0.0.1:4300/api/cron/suscripciones?key=EL_CRON_SECRET" > /dev/null
 ```
 
-Saca el token de la cookie `crt_sesion` desde el navegador (DevTools → Application → Cookies). O simplemente entra al panel y aprieta "Generar cobros vencidos" cuando quieras.
+Ese endpoint no necesita sesión (se autentica con la clave). O entra al panel y aprieta
+"Generar cobros vencidos" cuando quieras.
 
 ## Respaldo
 
-La base es un solo archivo. Respáldala con:
+La base es un solo archivo. Usa el script incluido:
 
 ```bash
-sqlite3 data/crt.db ".backup '/root/backups/crt-$(date +%F).db'"
+./scripts/backup.sh                       # respaldo local en /root/backups, rota a 60 días
+BACKUP_DIR=/mnt/disco ./scripts/backup.sh  # otra carpeta
 ```
 
-Cron semanal recomendado. También puedes bajar todo en JSON desde `/api/backup` o en CSV desde la vista Reportes.
+Para copia off-site automática, exporta `TELEGRAM_TOKEN` y `TELEGRAM_CHAT` (un bot de
+Telegram) antes de llamarlo. Cron diario recomendado:
+
+```bash
+0 3 * * * /opt/crt-contable/scripts/backup.sh >> /var/log/crt-backup.log 2>&1
+```
+
+También puedes bajar todo en JSON desde `/api/backup` o en CSV desde la vista Reportes.
+
+## Seguridad
+
+- Login con límite de intentos: 5 fallos por IP → bloqueo de 15 min.
+- Cabeceras: CSP, `X-Frame-Options`, `nosniff`, y HSTS cuando `NODE_ENV=production`.
+- Detrás de nginx, pon `TRUST_PROXY=1` para que el límite de intentos vea la IP real.
+- Cambiar la contraseña desde el panel: botón **Cuenta** arriba a la derecha.
 
 ## Cómo funciona la contabilidad
 

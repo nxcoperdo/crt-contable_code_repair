@@ -62,6 +62,7 @@ input,select,textarea{font:inherit}
 .barra .marca-nombre::before{color:#3A4550}
 .barra .btn-texto{color:#93A1B0}
 .barra .btn-texto:hover{color:#fff}
+.barra-acciones{display:flex;gap:2px;flex:none}
 
 /* entrada */
 .entrada{min-height:100dvh;display:grid;place-items:center;padding:24px;background:var(--negro)}

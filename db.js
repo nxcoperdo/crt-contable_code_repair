@@ -147,4 +147,21 @@ if (!hayLineas) {
   ].forEach((l) => ins.run(...l));
 }
 
+/* ------------------------------ migraciones ------------------------------ */
+// Cada paso es idempotente donde se pueda y corre una sola vez.
+// user_version arranca en 0; se sube uno por paso aplicado.
+const PASOS = [
+  // v1, v2, ... se agregan aquí a medida que evoluciona el esquema.
+];
+
+function migrar() {
+  let v = db.pragma('user_version', { simple: true });
+  for (let i = v; i < PASOS.length; i++) {
+    db.transaction(() => PASOS[i](db))();
+    db.pragma('user_version = ' + (i + 1));
+    console.log(`[crt] migración aplicada: v${i + 1}`);
+  }
+}
+migrar();
+
 module.exports = db;

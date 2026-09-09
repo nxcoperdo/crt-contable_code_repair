@@ -7,6 +7,31 @@ const auth = require('./auth');
 const app = express();
 const PORT = process.env.PORT || 4300;
 
+// Detrás de nginx: TRUST_PROXY=1 para que req.ip sea la IP real del cliente.
+if (process.env.TRUST_PROXY) app.set('trust proxy', Number(process.env.TRUST_PROXY) || 1);
+
+const CSP = [
+  "default-src 'self'",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src https://fonts.gstatic.com",
+  "img-src 'self' data:",
+  "script-src 'self'",
+  "base-uri 'none'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+].join('; ');
+
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'same-origin');
+  res.setHeader('Content-Security-Policy', CSP);
+  if (process.env.NODE_ENV === 'production') {
+    res.setHeader('Strict-Transport-Security', 'max-age=15552000; includeSubDomains');
+  }
+  next();
+});
+
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1h' }));
 
@@ -28,9 +53,18 @@ function ok(res, fn) {
 /* ---------------------------------- auth --------------------------------- */
 
 app.post('/api/login', (req, res) => {
+  const ip = req.ip || req.socket.remoteAddress || 'desconocida';
+  const puerta = auth.loginPermitido(ip);
+  if (!puerta.ok) {
+    return res.status(429).json({ error: `Demasiados intentos fallidos. Espera ${puerta.esperaSegundos} s.` });
+  }
   const { usuario, clave } = req.body || {};
   const u = auth.verificar(String(usuario || ''), String(clave || ''));
-  if (!u) return res.status(401).json({ error: 'Usuario o clave incorrectos.' });
+  if (!u) {
+    auth.loginFallido(ip);
+    return res.status(401).json({ error: 'Usuario o clave incorrectos.' });
+  }
+  auth.loginOk(ip);
   auth.darSesion(res, u);
   res.json({ usuario: u.usuario });
 });
@@ -46,7 +80,25 @@ app.get('/api/yo', (req, res) => {
   res.json({ usuario: s.u });
 });
 
+// Tarea programada: no requiere sesión, se autentica con CRON_SECRET.
+//   0 7 * * *  curl -s -X POST "http://127.0.0.1:4300/api/cron/suscripciones?key=$CRON_SECRET"
+app.post('/api/cron/suscripciones', (req, res) => {
+  const key = req.query.key || req.get('x-cron-key');
+  if (!process.env.CRON_SECRET || key !== process.env.CRON_SECRET) {
+    return res.status(403).json({ error: 'clave de cron inválida' });
+  }
+  ok(res, generarVencidas);
+});
+
 app.use('/api', auth.requiereSesion);
+
+app.post('/api/cuenta/clave', (req, res) =>
+  ok(res, () => {
+    const { actual, nueva } = req.body || {};
+    auth.cambiarClave(req.usuario, String(actual || ''), String(nueva || ''));
+    return { ok: true };
+  })
+);
 
 /* --------------------------------- CRUD ---------------------------------- */
 
@@ -100,6 +152,23 @@ function filtros(tabla, q) {
   return { where: cond.length ? 'WHERE ' + cond.join(' AND ') : '', args };
 }
 
+// Validaciones comunes antes de insertar/actualizar cualquier tabla.
+const CAMPOS_MONTO = ['monto', 'costo_unitario', 'precio_venta', 'precio_unitario', 'total', 'cantidad', 'stock', 'stock_minimo'];
+function revisarComunes(body) {
+  for (const k of CAMPOS_MONTO) {
+    if (body[k] !== undefined && body[k] !== '' && body[k] !== null) {
+      const n = Number(body[k]);
+      if (!Number.isFinite(n)) throw new Error(`"${k}" no es un número válido`);
+      if (n < 0 && k !== 'cantidad') throw new Error(`"${k}" no puede ser negativo`);
+    }
+  }
+  for (const k of ['fecha', 'fecha_pago', 'proxima_fecha']) {
+    if (body[k] && !/^\d{4}-\d{2}-\d{2}$/.test(String(body[k]))) {
+      throw new Error(`"${k}" debe tener el formato AAAA-MM-DD`);
+    }
+  }
+}
+
 for (const [tabla, def] of Object.entries(TABLAS)) {
   app.get('/api/' + tabla, (req, res) =>
     ok(res, () => {
@@ -111,6 +180,7 @@ for (const [tabla, def] of Object.entries(TABLAS)) {
 
   app.post('/api/' + tabla, (req, res) =>
     ok(res, () => {
+      revisarComunes(req.body || {});
       const usados = def.campos.filter((c) => req.body[c] !== undefined && req.body[c] !== '');
       if (!usados.length) throw new Error('No enviaste ningún dato');
       const info = db
@@ -125,6 +195,7 @@ for (const [tabla, def] of Object.entries(TABLAS)) {
 
   app.put('/api/' + tabla + '/:id', (req, res) =>
     ok(res, () => {
+      revisarComunes(req.body || {});
       const campos = def.campos.filter((c) => req.body[c] !== undefined);
       if (!campos.length) throw new Error('Nada que actualizar');
       db.prepare(`UPDATE ${tabla} SET ${campos.map((c) => c + ' = ?').join(', ')} WHERE id = ?`).run(
@@ -160,29 +231,29 @@ function avanzar(fecha, ciclo) {
   return d.toISOString().slice(0, 10);
 }
 
-app.post('/api/suscripciones/generar-vencidas', (req, res) =>
-  ok(res, () => {
-    const vencidas = db.prepare('SELECT * FROM suscripciones WHERE activa = 1 AND proxima_fecha <= ?').all(hoy());
-    let generados = 0;
-    const tx = db.transaction((lista) => {
-      for (const s of lista) {
-        const yaExiste = db
-          .prepare('SELECT id FROM ingresos WHERE suscripcion_id = ? AND fecha = ?')
-          .get(s.id, s.proxima_fecha);
-        if (!yaExiste) {
-          db.prepare(
-            `INSERT INTO ingresos (fecha, linea_id, cliente_id, concepto, monto, metodo, estado, suscripcion_id, notas, creado)
-             VALUES (?, ?, ?, ?, ?, 'nequi', 'pendiente', ?, '', datetime('now'))`
-          ).run(s.proxima_fecha, s.linea_id, s.cliente_id, s.concepto, s.monto, s.id);
-          generados++;
-        }
-        db.prepare('UPDATE suscripciones SET proxima_fecha = ? WHERE id = ?').run(avanzar(s.proxima_fecha, s.ciclo), s.id);
+function generarVencidas() {
+  const vencidas = db.prepare('SELECT * FROM suscripciones WHERE activa = 1 AND proxima_fecha <= ?').all(hoy());
+  let generados = 0;
+  const tx = db.transaction((lista) => {
+    for (const s of lista) {
+      const yaExiste = db
+        .prepare('SELECT id FROM ingresos WHERE suscripcion_id = ? AND fecha = ?')
+        .get(s.id, s.proxima_fecha);
+      if (!yaExiste) {
+        db.prepare(
+          `INSERT INTO ingresos (fecha, linea_id, cliente_id, concepto, monto, metodo, estado, suscripcion_id, notas, creado)
+           VALUES (?, ?, ?, ?, ?, 'nequi', 'pendiente', ?, '', datetime('now'))`
+        ).run(s.proxima_fecha, s.linea_id, s.cliente_id, s.concepto, s.monto, s.id);
+        generados++;
       }
-    });
-    tx(vencidas);
-    return { generados };
-  })
-);
+      db.prepare('UPDATE suscripciones SET proxima_fecha = ? WHERE id = ?').run(avanzar(s.proxima_fecha, s.ciclo), s.id);
+    }
+  });
+  tx(vencidas);
+  return { generados };
+}
+
+app.post('/api/suscripciones/generar-vencidas', (req, res) => ok(res, generarVencidas));
 
 app.post('/api/suscripciones/:id/cobrar', (req, res) =>
   ok(res, () => {
