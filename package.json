@@ -1,0 +1,16 @@
+{
+  "name": "crt-contable",
+  "version": "1.0.0",
+  "description": "Panel financiero de Code Repair Tech",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "better-sqlite3": "^12.6.0",
+    "express": "^5.2.0"
+  }
+}

@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="es-CO">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1B2A24">
+<title>Contable · Code Repair Tech</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<div id="entrada" class="entrada" hidden>
+  <div class="entrada-caja">
+    <div class="marca">
+      <span class="marca-sigla">CRT</span>
+      <span class="marca-nombre">Contable</span>
+    </div>
+    <p class="entrada-texto">Las cuentas de Code Repair Tech: qué entra, qué sale y qué queda.</p>
+    <label class="campo"><span>Usuario</span><input id="in-usuario" autocomplete="username" autocapitalize="none"></label>
+    <label class="campo"><span>Clave</span><input id="in-clave" type="password" autocomplete="current-password"></label>
+    <button class="btn btn-principal" id="btn-entrar">Entrar</button>
+    <p class="error" id="entrada-error" hidden></p>
+  </div>
+</div>
+
+<div id="app" hidden>
+  <header class="barra">
+    <div class="marca">
+      <span class="marca-sigla">CRT</span>
+      <span class="marca-nombre">Contable</span>
+    </div>
+    <button class="btn btn-texto" id="btn-salir">Cerrar sesión</button>
+  </header>
+
+  <nav class="navegacion" id="nav"></nav>
+
+  <main id="vista" class="vista"></main>
+
+  <div class="acciones-fijas">
+    <button class="btn btn-ingreso" data-nuevo="ingresos">Registrar ingreso</button>
+    <button class="btn btn-gasto" data-nuevo="gastos">Registrar gasto</button>
+  </div>
+</div>
+
+<div class="modal" id="modal" hidden>
+  <div class="modal-caja" role="dialog" aria-modal="true">
+    <div class="modal-titulo">
+      <h2 id="modal-titulo">Registro</h2>
+      <button class="btn btn-texto" id="modal-cerrar" aria-label="Cerrar">Cerrar</button>
+    </div>
+    <div id="modal-campos" class="modal-campos"></div>
+    <p class="error" id="modal-error" hidden></p>
+    <div class="modal-pie">
+      <button class="btn btn-principal" id="modal-guardar">Guardar</button>
+    </div>
+  </div>
+</div>
+
+<div id="aviso" class="aviso" hidden></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
