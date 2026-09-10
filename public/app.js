@@ -698,12 +698,34 @@ async function cargarCatalogos() {
 async function render() {
   pintarNav();
   const cont = $('#vista');
-  try {
-    cont.innerHTML = await (VISTA_FN[estado.vista] || vistaPanel)();
-    animarCifras(cont);
-  } catch (e) {
-    cont.innerHTML = `<div class="bloque"><p class="error">${esc(e.message)}</p></div>`;
+  let hecho = false;
+  const pintar = async () => {
+    try {
+      cont.innerHTML = await (VISTA_FN[estado.vista] || vistaPanel)();
+      animarCifras(cont);
+    } catch (e) {
+      cont.innerHTML = `<div class="bloque"><p class="error">${esc(e.message)}</p></div>`;
+    }
+    hecho = true;
+  };
+
+  const conTransicion =
+    render.animar && document.startViewTransition && !sinMovimiento() && !render._activa && !$('#app').hidden;
+  render.animar = false;
+
+  if (conTransicion) {
+    render._activa = true;
+    try {
+      const t = document.startViewTransition(pintar);
+      t.ready.catch(() => {});
+      t.finished.catch(() => {}).finally(() => { render._activa = false; });
+      await t.updateCallbackDone.catch(() => {});
+    } catch (_) {}
+    render._activa = false;
+  } else {
+    await pintar();
   }
+  if (!hecho) await pintar();
   const mes = $('#mes') || $('#f-mes');
   if (mes)
     mes.onchange = (ev) => {
@@ -801,21 +823,51 @@ async function iniciar() {
   await render();
 }
 
-$('#btn-entrar').onclick = async () => {
-  const err = $('#entrada-error');
-  err.hidden = true;
+// Onda al pulsar cualquier botón.
+document.addEventListener('pointerdown', (ev) => {
+  const b = ev.target.closest && ev.target.closest('.btn');
+  if (!b || b.disabled || sinMovimiento()) return;
+  const r = b.getBoundingClientRect();
+  const d = Math.max(r.width, r.height);
+  const o = document.createElement('span');
+  o.className = 'onda';
+  o.style.width = o.style.height = d + 'px';
+  o.style.left = ev.clientX - r.left - d / 2 + 'px';
+  o.style.top = ev.clientY - r.top - d / 2 + 'px';
+  b.appendChild(o);
+  setTimeout(() => o.remove(), 550);
+});
+
+// Estado "cargando" en un botón mientras corre una promesa.
+async function conCarga(btn, fn) {
+  if (!btn || btn.classList.contains('cargando')) return;
+  btn.classList.add('cargando');
   try {
-    await api('POST', '/login', { usuario: $('#in-usuario').value.trim(), clave: $('#in-clave').value });
-    await iniciar();
-  } catch (e) {
-    err.textContent = e.message;
-    err.hidden = false;
+    return await fn();
+  } finally {
+    btn.classList.remove('cargando');
   }
-};
+}
+
+$('#btn-entrar').onclick = () =>
+  conCarga($('#btn-entrar'), async () => {
+    const err = $('#entrada-error');
+    err.hidden = true;
+    try {
+      await api('POST', '/login', { usuario: $('#in-usuario').value.trim(), clave: $('#in-clave').value });
+      await iniciar();
+    } catch (e) {
+      err.textContent = e.message;
+      err.hidden = false;
+    }
+  });
 $('#in-clave').addEventListener('keydown', (e) => e.key === 'Enter' && $('#btn-entrar').click());
 
 $('#btn-salir').onclick = async () => {
   await fetch('/api/logout', { method: 'POST' });
+  if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+    navigator.serviceWorker.controller.postMessage('limpiar-cache');
+  }
   location.reload();
 };
 
@@ -845,13 +897,46 @@ $('#btn-cuenta').onclick = () =>
   });
 
 $('#modal-cerrar').onclick = cerrarFormulario;
-$('#modal-guardar').onclick = guardarFormulario;
+$('#modal-guardar').onclick = () => conCarga($('#modal-guardar'), guardarFormulario);
 $('#modal').addEventListener('click', (e) => e.target.id === 'modal' && cerrarFormulario());
 document.addEventListener('keydown', (e) => e.key === 'Escape' && cerrarFormulario());
+
+/* --------------------------------- PWA ---------------------------------- */
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+}
+
+let promptInstalar = null;
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  promptInstalar = e;
+  $('#btn-instalar').hidden = false;
+});
+$('#btn-instalar').onclick = async () => {
+  if (!promptInstalar) return;
+  promptInstalar.prompt();
+  await promptInstalar.userChoice;
+  promptInstalar = null;
+  $('#btn-instalar').hidden = true;
+};
+window.addEventListener('appinstalled', () => ($('#btn-instalar').hidden = true));
+
+function pintarConexion() {
+  const el = $('#offline');
+  if (el) el.hidden = navigator.onLine;
+}
+window.addEventListener('online', () => {
+  pintarConexion();
+  if (!$('#app').hidden) render();
+});
+window.addEventListener('offline', pintarConexion);
+pintarConexion();
 
 window.addEventListener('hashchange', () => {
   const v = location.hash.slice(1);
   estado.vista = VISTA_FN[v] ? v : 'panel';
+  render.animar = true;
   render();
 });
 

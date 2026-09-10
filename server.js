@@ -16,6 +16,9 @@ const CSP = [
   "font-src https://fonts.gstatic.com",
   "img-src 'self' data:",
   "script-src 'self'",
+  "worker-src 'self'",
+  "manifest-src 'self'",
+  "connect-src 'self'",
   "base-uri 'none'",
   "form-action 'self'",
   "frame-ancestors 'none'",
@@ -33,7 +36,22 @@ app.use((req, res, next) => {
 });
 
 app.use(express.json({ limit: '1mb' }));
-app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1h' }));
+
+// El service worker debe revalidarse siempre para que los cambios lleguen rápido.
+app.get('/sw.js', (req, res) => {
+  res.set('Cache-Control', 'no-cache');
+  res.type('application/javascript');
+  res.sendFile(path.join(__dirname, 'public', 'sw.js'));
+});
+
+// Assets con ETag y revalidación (304 si no cambió); el SW es la capa de caché real.
+app.use(
+  express.static(path.join(__dirname, 'public'), {
+    etag: true,
+    maxAge: 0,
+    setHeaders: (res) => res.set('Cache-Control', 'no-cache'),
+  })
+);
 
 auth.asegurarAdmin();
 
