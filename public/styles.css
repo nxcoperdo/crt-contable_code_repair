@@ -413,3 +413,37 @@ input,select,textarea{font:inherit}
   .barra-acciones .btn-texto{font-size:13px;padding:8px}
   .utilidad-cifra{font-size:clamp(30px,11vw,44px)}
 }
+
+/* ------------------- abonos, cuentas por pagar e impuestos ---------------- */
+
+/* Un documento con abonos pero sin saldar: ni verde ni ámbar. */
+.estado-parcial{background:var(--azul-suave);color:var(--azul)}
+
+/* Panel: "quién te debe" y "lo que debes", lado a lado en pantalla ancha. */
+.dos-columnas{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}
+@media (max-width:860px){.dos-columnas{grid-template-columns:1fr;gap:0}}
+
+/* Cuánto se ha abonado de un documento. */
+.progreso{height:6px;border-radius:6px;background:var(--superficie-2);overflow:hidden;margin:10px 0 14px}
+.progreso>span{display:block;height:100%;border-radius:6px;background:var(--azul-degradado);transition:width .35s ease}
+
+/* Cartera por antigüedad. */
+.tramos{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-top:10px}
+.tramos>div{background:var(--superficie-2);border:1px solid var(--borde-suave);border-radius:10px;padding:10px 8px;text-align:center}
+.tramos span{display:block;font-size:11px;color:var(--tinta-suave);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px}
+.tramos b{font-size:14px}
+@media (max-width:700px){.tramos{grid-template-columns:repeat(2,1fr)}}
+
+/* Cabecera y previo del total dentro del modal. */
+.modal-encabezado{margin-bottom:4px}
+.modal-doc{margin:0 0 4px;font-size:15px}
+.modal-resumen{
+  grid-column:1/-1;margin:6px 0 0;padding:10px 12px;border-radius:10px;
+  background:var(--superficie-2);border:1px solid var(--borde-suave);
+  font-size:13px;color:var(--tinta-suave)
+}
+.modal-resumen b{color:var(--tinta);font-size:15px}
+
+/* Listas densas: kardex, abonos, bitácora. */
+.fila-compacta{padding-top:10px;padding-bottom:10px}
+.filas-abonos{max-height:34vh;overflow-y:auto;margin-bottom:10px}

@@ -2,12 +2,14 @@
 
 Panel financiero de Code Repair Tech. Node + Express + SQLite, sin build ni dependencias de frontend.
 
-Responde a cuatro preguntas, en ese orden:
+Responde a seis preguntas, en ese orden:
 
-1. Cuánto te quedó limpio este mes
+1. Cuánto te quedó limpio este mes (plata que de verdad se movió)
 2. Cuál línea (GigantYA, Daemon Leads, AgroValor, NFC, webs, reparaciones) deja plata y cuál sangra
 3. Quién te debe y hace cuántos días
-4. Cuánto pagas fijo cada mes y cuánto tienes que vender para no perder
+4. A quién le debes tú y cuándo vence
+5. Cuánto pagas fijo cada mes y cuánto tienes que vender para no perder
+6. Cuánto IVA y cuánta retención te tocan este mes
 
 ## Instalar en el VPS
 
@@ -28,6 +30,7 @@ Crea el archivo `.env` **o** pasa las variables directo a pm2:
 | `SESSION_SECRET` | Cadena larga y aleatoria. Si cambia, se cierran las sesiones |
 | `DATA_DIR` | Dónde vive `crt.db` (por defecto `./data`) |
 | `NODE_ENV` | Ponlo en `production` para que la cookie sea Secure |
+| `ZONA_HORARIA` | Zona con la que se fechan los movimientos (por defecto `America/Bogota`) |
 
 Genera el secreto con: `openssl rand -hex 32`
 
@@ -79,8 +82,10 @@ crontab -e
 0 7 * * * curl -s -X POST "http://127.0.0.1:4300/api/cron/suscripciones?key=EL_CRON_SECRET" > /dev/null
 ```
 
-Ese endpoint no necesita sesión (se autentica con la clave). O entra al panel y aprieta
-"Generar cobros vencidos" cuando quieras.
+Ese endpoint no necesita sesión (se autentica con la clave) y hace dos cosas: convierte
+las suscripciones vencidas en cuentas por cobrar **y** los pagos fijos vencidos (VPS,
+dominios, APIs) en cuentas por pagar. O entra al panel y aprieta "Generar cobros vencidos"
+en **Cobros** y "Generar pagos vencidos" en **Pagos fijos**.
 
 ## Respaldo
 
@@ -109,24 +114,65 @@ También puedes bajar todo en JSON desde `/api/backup` o en CSV desde la vista R
 
 ## Cómo funciona la contabilidad
 
-- **Base caja.** Un ingreso cuenta cuando está marcado como pagado; un gasto cuenta el día que lo registras.
-- **Cuentas por cobrar.** Los ingresos en estado "por cobrar" no suman a la utilidad, pero salen en "Quién te debe".
-- **Inventario.** Cuando registras una entrada de producto, se crea el gasto de la compra en ese momento. La venta después solo genera ingreso, para no contar el costo dos veces. El margen por unidad se muestra aparte, como referencia.
-- **Gastos fijos vs variables.** Marca como fijo lo que pagas todos los meses (VPS, dominios, APIs). El punto de equilibrio se calcula con esos fijos y tu margen de contribución del mes.
+- **Base caja de verdad.** La utilidad de un mes sale de los **abonos** de ese mes, no de la
+  fecha de la factura. Una factura de enero que cobras en marzo es plata de marzo. (Antes se
+  contaba en enero, así que un mes ya cerrado cambiaba solo cuando te pagaban.)
+- **Abonos.** Un ingreso o un gasto puede cobrarse o pagarse por partes. El estado sale solo:
+  `pendiente` → `parcial` → `pagado`. El botón **Abonos** de cada fila muestra el saldo y el
+  historial.
+- **Cuentas por cobrar y por pagar.** Un gasto también puede quedar debiendo: el panel tiene
+  "Quién te debe" y "Lo que debes", y Reportes trae la cartera por antigüedad (al día, 1–30,
+  31–60, 61–90, +90 días).
+- **Impuestos.** Cada documento se arma con `base + IVA − retención = total`. El reporte de
+  IVA y retenciones se causa con la **fecha del documento** (no con la del pago), que es como
+  se declara.
+- **Moneda.** Si pagas en USD o EUR, escribes la base en esa moneda y la TRM; el sistema
+  guarda todo en pesos y recuerda el valor original.
+- **Inventario.** Una entrada de producto crea el gasto de la compra (que puedes dejar
+  debiendo). La venta después solo genera ingreso, para no contar el costo dos veces. Cada
+  entrada, salida y ajuste queda en el **kardex**.
+- **Gastos fijos vs variables.** Marca como fijo lo que pagas todos los meses. Si se repite,
+  créalo en **Pagos fijos** y se registra solo: el punto de equilibrio deja de quedarse corto
+  porque se te olvidó cargar el VPS.
+- **Punto de equilibrio.** Se calcula con los fijos del mes y tu margen de contribución.
 - **MRR.** Suma de suscripciones activas, con las anuales divididas entre 12.
+- **Nada se borra de golpe.** Lo que borras cae en la **Papelera** con todo lo que colgaba de
+  ello; restaurar una venta devuelve su ingreso, sus abonos y vuelve a descontar el stock.
+  Toda acción queda en la **bitácora**.
+- **Zona horaria.** Todo se fecha en hora de Colombia (`ZONA_HORARIA`, por defecto
+  `America/Bogota`). Con UTC, lo registrado después de las 7 p.m. caía al día siguiente.
 
 ## Estructura
 
 ```
-server.js       API (CRUD genérico + acciones + reportes + export)
-db.js           esquema SQLite y semilla de líneas
-auth.js         login con scrypt y cookie firmada, sin dependencias
-public/         panel (index.html, styles.css, app.js)
-data/crt.db     tu base de datos
+server.js         API (CRUD genérico + abonos + acciones + reportes + export)
+db.js             esquema SQLite, migraciones y semilla de líneas
+auth.js           login con scrypt y cookie firmada, sin dependencias
+public/           panel (index.html, styles.css, app.js, sw.js)
+scripts/prueba.js prueba de extremo a extremo: npm run prueba
+scripts/backup.sh respaldo de la base
+data/crt.db       tu base de datos
 ```
+
+El esquema se migra solo al arrancar (`user_version` de SQLite). Una base con datos
+viejos se actualiza sin perder nada: los ingresos ya marcados como pagados se convierten
+en abonos con su fecha de cobro real.
 
 ## Añadir cosas después
 
-- **Facturación DIAN:** una tabla `facturas` colgando de `ingresos` y el cliente de tu proveedor tecnológico.
-- **Datos reales de GigantYA:** un cron que lea la base de GigantYA y cree los ingresos del mes automáticamente en vez de escribirlos a mano.
+- **Facturación electrónica DIAN:** ya está el desglose fiscal (base, IVA, retención); falta
+  una tabla `facturas` colgando de `ingresos` y el cliente de tu proveedor tecnológico.
+- **Datos reales de GigantYA:** un cron que lea la base de GigantYA y cree los ingresos del mes
+  automáticamente en vez de escribirlos a mano.
 - **Multiusuario:** ya existe la tabla `usuarios`; falta una columna de rol y filtrar por ella.
+- **TRM automática:** hoy la escribes a mano en cada documento en dólares; podría bajarse sola.
+
+## Pruebas
+
+```bash
+npm run prueba
+```
+
+Levanta el servidor contra una base temporal y comprueba de punta a punta el cálculo de
+impuestos, los abonos parciales, la base caja, el stock al borrar y restaurar ventas, las
+cuentas por pagar y la papelera.

@@ -3,8 +3,15 @@
 /* ------------------------------- utilidades ------------------------------- */
 
 const $ = (s, ctx = document) => ctx.querySelector(s);
-const hoy = () => new Date().toISOString().slice(0, 10);
+const $$ = (s, ctx = document) => Array.from(ctx.querySelectorAll(s));
+
+// Hora de Colombia, no UTC: si no, todo lo registrado después de las 7 p.m.
+// se fechaba al día siguiente.
+const ZONA = 'America/Bogota';
+const fmtDia = new Intl.DateTimeFormat('en-CA', { timeZone: ZONA, year: 'numeric', month: '2-digit', day: '2-digit' });
+const hoy = () => fmtDia.format(new Date());
 const mesActual = () => hoy().slice(0, 7);
+
 const pesos = (n) => '$' + new Intl.NumberFormat('es-CO').format(Math.round(n || 0));
 const corto = (n) => {
   const a = Math.abs(n);
@@ -25,6 +32,11 @@ const pct1 = (n) => {
 const margenSobreVenta = (venta, costo) => (venta > 0 ? ((venta - costo) / venta) * 100 : 0);
 const margenSobreCosto = (venta, costo) => (costo > 0 ? ((venta - costo) / costo) * 100 : 0);
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+const ETIQUETA_ESTADO = { pagado: 'pagado', parcial: 'abonado', pendiente: 'por cobrar' };
+const ETIQUETA_ESTADO_GASTO = { pagado: 'pagado', parcial: 'abonado', pendiente: 'por pagar' };
+const marcaEstado = (estado, mapa = ETIQUETA_ESTADO) =>
+  `<span class="marca-estado estado-${esc(estado)}">${esc(mapa[estado] || estado)}</span>`;
 
 function aviso(texto) {
   const el = $('#aviso');
@@ -81,18 +93,21 @@ const estado = {
   lineas: [],
   clientes: [],
   productos: [],
+  filtro: { linea_id: '', estado: '', q: '', producto_id: '', categoria: '' },
 };
 
 const VISTAS = [
   ['panel', 'Panel'],
   ['ingresos', 'Ingresos'],
   ['gastos', 'Gastos'],
-  ['suscripciones', 'Suscripciones'],
   ['ventas', 'Ventas'],
   ['inventario', 'Inventario'],
+  ['suscripciones', 'Cobros'],
+  ['recurrentes', 'Pagos fijos'],
   ['clientes', 'Clientes'],
   ['lineas', 'Líneas'],
   ['reportes', 'Reportes'],
+  ['papelera', 'Papelera'],
 ];
 
 const nombreLinea = (id) => (estado.lineas.find((l) => l.id === id) || {}).nombre || 'General';
@@ -106,39 +121,94 @@ const opcionesProducto = () => estado.productos.map((p) => ({ v: p.id, t: `${p.n
 
 const METODOS = ['nequi', 'daviplata', 'bre-b', 'mercadopago', 'transferencia', 'efectivo', 'otro'].map((v) => ({ v, t: v }));
 const CATEGORIAS = ['servidores', 'apis', 'dominios', 'whatsapp api', 'inventario', 'materiales', 'transporte', 'publicidad', 'herramientas', 'impuestos', 'otros'].map((v) => ({ v, t: v }));
+const MONEDAS = [{ v: 'COP', t: 'COP · pesos' }, { v: 'USD', t: 'USD · dólares' }, { v: 'EUR', t: 'EUR · euros' }];
+const IVAS = [{ v: 0, t: 'Sin IVA (0%)' }, { v: 5, t: '5%' }, { v: 19, t: '19%' }];
+const CICLOS = [{ v: 'mensual', t: 'Mensual' }, { v: 'anual', t: 'Anual' }];
+
+/* --------------------------- campos de documento --------------------------
+   Ingresos y gastos comparten la parte fiscal: base, IVA, retención y moneda.
+   El total sale calculado; no se escribe a mano.
+-------------------------------------------------------------------------- */
+
+const camposFiscales = () => [
+  { k: 'base', l: 'Base (antes de IVA)', t: 'number', req: true },
+  { k: 'iva_pct', l: 'IVA', t: 'select', opts: () => IVAS, def: 0 },
+  { k: 'rete_pct', l: 'Retención %', t: 'number', def: 0, paso: '0.1' },
+  { k: 'moneda', l: 'Moneda', t: 'select', opts: () => MONEDAS, def: 'COP' },
+  { k: 'trm', l: 'TRM (pesos por unidad)', t: 'number', def: 1, soloSi: (d) => d.moneda && d.moneda !== 'COP' },
+];
+
+// Rehace la cuenta del documento igual que el servidor, para el previo en vivo.
+function totalDocumento(d) {
+  const moneda = d.moneda || 'COP';
+  const trm = moneda === 'COP' ? 1 : Number(d.trm) || 1;
+  const base = Math.round((Number(d.base) || 0) * trm);
+  const iva = Math.round((base * (Number(d.iva_pct) || 0)) / 100);
+  const rete = Math.round((base * (Number(d.rete_pct) || 0)) / 100);
+  return { base, iva, rete, total: base + iva - rete, moneda, trm };
+}
+
+function resumenDocumento(d) {
+  const c = totalDocumento(d);
+  const partes = [`Base ${pesos(c.base)}`];
+  if (c.iva) partes.push(`IVA ${pesos(c.iva)}`);
+  if (c.rete) partes.push(`− retención ${pesos(c.rete)}`);
+  if (c.moneda !== 'COP') partes.push(`${Number(d.base) || 0} ${c.moneda} × ${c.trm}`);
+  return `${partes.join(' · ')} = <b class="num">${pesos(c.total)}</b>`;
+}
 
 /* ------------------------------ formularios ------------------------------- */
 
 const FORMULARIOS = {
   ingresos: () => [
     { k: 'fecha', l: 'Fecha', t: 'date', def: hoy() },
-    { k: 'monto', l: 'Monto', t: 'number', req: true },
+    ...camposFiscales(),
     { k: 'concepto', l: 'Concepto', t: 'text', req: true, ancho: true },
     { k: 'linea_id', l: 'Línea', t: 'select', opts: opcionesLinea },
     { k: 'cliente_id', l: 'Cliente', t: 'select', opts: opcionesCliente },
     { k: 'metodo', l: 'Método', t: 'select', opts: () => METODOS, def: 'nequi' },
-    { k: 'estado', l: 'Estado', t: 'select', opts: () => [{ v: 'pagado', t: 'Pagado' }, { v: 'pendiente', t: 'Por cobrar' }], def: 'pagado' },
+    { k: 'estado', l: 'Estado', t: 'select', opts: () => [{ v: 'pagado', t: 'Ya me lo pagaron' }, { v: 'pendiente', t: 'Por cobrar' }], def: 'pagado' },
+    { k: 'vence', l: 'Vence el', t: 'date', soloSi: (d) => d.estado === 'pendiente' },
     { k: 'notas', l: 'Notas', t: 'text', ancho: true },
   ],
   gastos: () => [
     { k: 'fecha', l: 'Fecha', t: 'date', def: hoy() },
-    { k: 'monto', l: 'Monto', t: 'number', req: true },
+    ...camposFiscales(),
     { k: 'concepto', l: 'Concepto', t: 'text', req: true, ancho: true },
     { k: 'categoria', l: 'Categoría', t: 'select', opts: () => CATEGORIAS, def: 'servidores' },
     { k: 'tipo', l: 'Tipo', t: 'select', opts: () => [{ v: 'fijo', t: 'Fijo (todos los meses)' }, { v: 'variable', t: 'Variable' }], def: 'variable' },
     { k: 'linea_id', l: 'Línea', t: 'select', opts: opcionesLinea },
     { k: 'metodo', l: 'Método', t: 'select', opts: () => METODOS, def: 'nequi' },
+    { k: 'estado', l: 'Estado', t: 'select', opts: () => [{ v: 'pagado', t: 'Ya lo pagué' }, { v: 'pendiente', t: 'Lo debo' }], def: 'pagado' },
+    { k: 'vence', l: 'Vence el', t: 'date', soloSi: (d) => d.estado === 'pendiente' },
     { k: 'proveedor', l: 'Proveedor', t: 'text', ancho: true },
   ],
   suscripciones: () => [
     { k: 'concepto', l: 'Concepto', t: 'text', req: true, ancho: true },
-    { k: 'monto', l: 'Monto', t: 'number', req: true },
-    { k: 'ciclo', l: 'Ciclo', t: 'select', opts: () => [{ v: 'mensual', t: 'Mensual' }, { v: 'anual', t: 'Anual' }], def: 'mensual' },
+    { k: 'monto', l: 'Monto (base)', t: 'number', req: true },
+    { k: 'iva_pct', l: 'IVA', t: 'select', opts: () => IVAS, def: 0 },
+    { k: 'rete_pct', l: 'Retención %', t: 'number', def: 0, paso: '0.1' },
+    { k: 'ciclo', l: 'Ciclo', t: 'select', opts: () => CICLOS, def: 'mensual' },
     { k: 'cliente_id', l: 'Cliente', t: 'select', opts: opcionesCliente },
     { k: 'linea_id', l: 'Línea', t: 'select', opts: opcionesLinea },
     { k: 'proxima_fecha', l: 'Próximo cobro', t: 'date', def: hoy(), req: true },
     { k: 'activa', l: 'Estado', t: 'select', opts: () => [{ v: 1, t: 'Activa' }, { v: 0, t: 'Cancelada' }], def: 1 },
     { k: 'notas', l: 'Notas', t: 'text', ancho: true },
+  ],
+  gastos_recurrentes: () => [
+    { k: 'concepto', l: 'Concepto', t: 'text', req: true, ancho: true },
+    { k: 'monto', l: 'Monto (base)', t: 'number', req: true },
+    { k: 'moneda', l: 'Moneda', t: 'select', opts: () => MONEDAS, def: 'COP' },
+    { k: 'trm', l: 'TRM (pesos por unidad)', t: 'number', def: 1, soloSi: (d) => d.moneda && d.moneda !== 'COP' },
+    { k: 'iva_pct', l: 'IVA', t: 'select', opts: () => IVAS, def: 0 },
+    { k: 'categoria', l: 'Categoría', t: 'select', opts: () => CATEGORIAS, def: 'servidores' },
+    { k: 'tipo', l: 'Tipo', t: 'select', opts: () => [{ v: 'fijo', t: 'Fijo' }, { v: 'variable', t: 'Variable' }], def: 'fijo' },
+    { k: 'ciclo', l: 'Ciclo', t: 'select', opts: () => CICLOS, def: 'mensual' },
+    { k: 'linea_id', l: 'Línea', t: 'select', opts: opcionesLinea },
+    { k: 'metodo', l: 'Método', t: 'select', opts: () => METODOS, def: 'nequi' },
+    { k: 'proxima_fecha', l: 'Próximo pago', t: 'date', def: hoy(), req: true },
+    { k: 'activa', l: 'Estado', t: 'select', opts: () => [{ v: 1, t: 'Activo' }, { v: 0, t: 'Pausado' }], def: 1 },
+    { k: 'proveedor', l: 'Proveedor', t: 'text', ancho: true },
   ],
   clientes: () => [
     { k: 'nombre', l: 'Nombre', t: 'text', req: true, ancho: true },
@@ -165,29 +235,69 @@ const FORMULARIOS = {
   ],
 };
 
+// Ingresos y gastos llevan el previo del total en vivo.
+const RESUMEN_FORM = { ingresos: resumenDocumento, gastos: resumenDocumento };
+
 let formActual = null;
 
-function abrirFormulario({ titulo, campos, valores = {}, alGuardar }) {
-  formActual = { campos, alGuardar };
+function valoresForm() {
+  const datos = {};
+  if (!formActual) return datos;
+  for (const c of formActual.campos) {
+    const el = $(`[data-k="${c.k}"]`, $('#modal-campos'));
+    if (el) datos[c.k] = el.value;
+  }
+  return datos;
+}
+
+// Aplica las reglas soloSi y repinta el previo del total.
+function refrescarForm() {
+  if (!formActual) return;
+  const datos = valoresForm();
+  for (const c of formActual.campos) {
+    if (!c.soloSi) continue;
+    const el = $(`[data-k="${c.k}"]`, $('#modal-campos'));
+    if (el && el.closest('label')) el.closest('label').hidden = !c.soloSi(datos);
+  }
+  const caja = $('#modal-resumen');
+  if (caja) {
+    if (formActual.resumen) {
+      caja.innerHTML = formActual.resumen(datos);
+      caja.hidden = false;
+    } else {
+      caja.hidden = true;
+    }
+  }
+}
+
+function campoHtml(c, valores) {
+  const val = valores[c.k] !== undefined && valores[c.k] !== null ? valores[c.k] : c.def !== undefined ? c.def : '';
+  const clase = 'campo' + (c.ancho ? ' ancho' : '');
+  if (c.t === 'select') {
+    const opciones = (typeof c.opts === 'function' ? c.opts() : c.opts)
+      .map((o) => `<option value="${esc(o.v)}"${String(o.v) === String(val) ? ' selected' : ''}>${esc(o.t)}</option>`)
+      .join('');
+    return `<label class="${clase}"><span>${esc(c.l)}</span><select data-k="${c.k}">${opciones}</select></label>`;
+  }
+  const extra = c.t === 'number' ? ` inputmode="decimal" step="${c.paso || '1'}"` : '';
+  return `<label class="${clase}"><span>${esc(c.l)}</span><input data-k="${c.k}" type="${c.t}" value="${esc(val)}"${extra}></label>`;
+}
+
+function abrirFormulario({ titulo, campos, valores = {}, alGuardar, resumen, encabezado = '', textoGuardar = 'Guardar' }) {
+  formActual = { campos, alGuardar, resumen };
   $('#modal-titulo').textContent = titulo;
   $('#modal-error').hidden = true;
   const cont = $('#modal-campos');
-  cont.innerHTML = campos
-    .map((c) => {
-      const val = valores[c.k] !== undefined && valores[c.k] !== null ? valores[c.k] : c.def !== undefined ? c.def : '';
-      const clase = 'campo' + (c.ancho ? ' ancho' : '');
-      if (c.t === 'select') {
-        const opciones = (typeof c.opts === 'function' ? c.opts() : c.opts)
-          .map((o) => `<option value="${esc(o.v)}"${String(o.v) === String(val) ? ' selected' : ''}>${esc(o.t)}</option>`)
-          .join('');
-        return `<label class="${clase}"><span>${esc(c.l)}</span><select data-k="${c.k}">${opciones}</select></label>`;
-      }
-      const extra = c.t === 'number' ? ' inputmode="numeric" step="1"' : '';
-      return `<label class="${clase}"><span>${esc(c.l)}</span><input data-k="${c.k}" type="${c.t}" value="${esc(val)}"${extra}></label>`;
-    })
-    .join('');
+  cont.innerHTML =
+    (encabezado ? `<div class="modal-encabezado ancho">${encabezado}</div>` : '') +
+    campos.map((c) => campoHtml(c, valores)).join('') +
+    `<p class="modal-resumen ancho" id="modal-resumen" hidden></p>`;
+  const guardar = $('#modal-guardar');
+  guardar.hidden = !campos.length && !alGuardar;
+  guardar.textContent = textoGuardar;
   $('#modal').hidden = false;
-  const primero = cont.querySelector('input,select');
+  refrescarForm();
+  const primero = cont.querySelector('input:not([hidden]),select');
   if (primero && window.innerWidth > 760) primero.focus();
 }
 
@@ -201,13 +311,16 @@ async function guardarFormulario() {
   const datos = {};
   for (const c of formActual.campos) {
     const el = $(`[data-k="${c.k}"]`, $('#modal-campos'));
+    if (!el) continue;
+    const oculto = el.closest('label') && el.closest('label').hidden;
     let v = el.value;
-    if (c.req && !String(v).trim()) {
+    if (c.req && !oculto && !String(v).trim()) {
       $('#modal-error').textContent = `Falta ${c.l.toLowerCase()}.`;
       $('#modal-error').hidden = false;
       el.focus();
       return;
     }
+    if (oculto) continue;
     if (c.t === 'number' && v !== '') v = Number(v);
     datos[c.k] = v;
   }
@@ -223,30 +336,90 @@ async function guardarFormulario() {
   }
 }
 
+const TITULOS_NUEVO = {
+  ingresos: 'Nuevo ingreso',
+  gastos: 'Nuevo gasto',
+  suscripciones: 'Nuevo cobro recurrente',
+  gastos_recurrentes: 'Nuevo pago fijo',
+  clientes: 'Nuevo cliente',
+  lineas: 'Nueva línea',
+  productos: 'Nuevo producto',
+};
+
 function nuevo(tabla) {
-  const nombres = { ingresos: 'Nuevo ingreso', gastos: 'Nuevo gasto', suscripciones: 'Nueva suscripción', clientes: 'Nuevo cliente', lineas: 'Nueva línea', productos: 'Nuevo producto' };
   abrirFormulario({
-    titulo: nombres[tabla] || 'Nuevo registro',
+    titulo: TITULOS_NUEVO[tabla] || 'Nuevo registro',
     campos: FORMULARIOS[tabla](),
+    resumen: RESUMEN_FORM[tabla],
     alGuardar: (d) => api('POST', '/' + tabla, d),
   });
 }
 
-function editar(tabla, fila) {
+async function editar(tabla, id) {
+  // Una sola fila, no la tabla entera.
+  const fila = await api('GET', `/${tabla}/${id}`);
+  if (fila.monto_origen !== undefined && fila.moneda && fila.moneda !== 'COP') fila.base = fila.monto_origen;
   abrirFormulario({
     titulo: 'Editar',
     campos: FORMULARIOS[tabla](),
     valores: fila,
-    alGuardar: (d) => api('PUT', `/${tabla}/${fila.id}`, d),
+    resumen: RESUMEN_FORM[tabla],
+    alGuardar: (d) => api('PUT', `/${tabla}/${id}`, d),
   });
 }
 
 async function borrar(tabla, id) {
-  if (!confirm('¿Borrar este registro? No se puede deshacer.')) return;
+  if (!confirm('¿Borrar este registro? Queda en la Papelera por si te arrepientes.')) return;
   await api('DELETE', `/${tabla}/${id}`);
-  aviso('Borrado');
+  aviso('Borrado — está en la Papelera');
   await cargarCatalogos();
   render();
+}
+
+/* --------------------------------- abonos --------------------------------- */
+
+async function abrirAbonos(tipo, id) {
+  const tabla = tipo === 'ingreso' ? 'ingresos' : 'gastos';
+  const doc = await api('GET', `/${tabla}/${id}`);
+  const abonos = await api('GET', `/abonos?tipo=${tipo}&doc_id=${id}`);
+  const saldo = doc.monto - doc.abonado;
+  const mapa = tipo === 'ingreso' ? ETIQUETA_ESTADO : ETIQUETA_ESTADO_GASTO;
+
+  const listado = abonos.length
+    ? abonos
+        .map(
+          (a) => `<div class="fila fila-compacta">
+            <span class="fila-principal">${esc(a.fecha)} · ${esc(a.metodo || '')}</span>
+            <span class="fila-monto num">${pesos(a.monto)}</span>
+            ${a.nota ? `<span class="fila-detalle">${esc(a.nota)}</span>` : ''}
+            <span class="fila-acciones"><button class="btn-mini" data-borrar-abono="${a.id}:${tipo}:${id}">Quitar</button></span>
+          </div>`
+        )
+        .join('')
+    : '<p class="vacio">Todavía no hay abonos.</p>';
+
+  const encabezado = `
+    <p class="modal-doc"><b>${esc(doc.concepto)}</b> · ${esc(doc.fecha)} ${marcaEstado(doc.estado, mapa)}</p>
+    <p class="sub num">Total ${pesos(doc.monto)} · abonado ${pesos(doc.abonado)} · <b class="${saldo > 0 ? 'monto-negativo' : 'monto-positivo'}">saldo ${pesos(saldo)}</b></p>
+    <div class="progreso"><span style="width:${Math.min(100, doc.monto ? (doc.abonado / doc.monto) * 100 : 0)}%"></span></div>
+    <div class="filas filas-abonos">${listado}</div>
+    ${saldo > 0 ? '<p class="sub">Registrar un abono nuevo:</p>' : ''}`;
+
+  abrirFormulario({
+    titulo: tipo === 'ingreso' ? 'Abonos del cobro' : 'Abonos del pago',
+    encabezado,
+    campos: saldo > 0
+      ? [
+          { k: 'fecha', l: 'Fecha del abono', t: 'date', def: hoy() },
+          { k: 'monto', l: 'Monto', t: 'number', def: saldo, req: true },
+          { k: 'metodo', l: 'Método', t: 'select', opts: () => METODOS, def: doc.metodo || 'nequi' },
+          { k: 'nota', l: 'Nota', t: 'text', ancho: true },
+        ]
+      : [],
+    textoGuardar: 'Registrar abono',
+    alGuardar: saldo > 0 ? (d) => api('POST', '/abonos', { ...d, tipo, doc_id: id }) : null,
+  });
+  if (saldo <= 0) $('#modal-guardar').hidden = true;
 }
 
 /* --------------------------------- gráfica -------------------------------- */
@@ -298,6 +471,36 @@ function graficaUtilidad(serie) {
   </svg>`;
 }
 
+/* -------------------------------- filtros --------------------------------- */
+
+// Arma la consulta con los filtros que el usuario dejó puestos.
+function consulta(extra = {}) {
+  const p = new URLSearchParams();
+  if (extra.mes !== null) p.set('mes', estado.mes);
+  for (const [k, v] of Object.entries(estado.filtro)) if (v) p.set(k, v);
+  for (const [k, v] of Object.entries(extra)) if (v !== null && v !== undefined) p.set(k, v);
+  p.delete('undefined');
+  return p.toString();
+}
+
+function filtrosHtml({ mes = true, linea = true, estados = null, buscar = true, extra = '' } = {}) {
+  const f = estado.filtro;
+  return `<div class="filtros">
+    ${mes ? `<input type="month" data-filtro="mes" value="${estado.mes}" aria-label="Mes">` : ''}
+    ${linea ? `<select data-filtro="linea_id" aria-label="Línea">
+        <option value="">Todas las líneas</option>
+        ${estado.lineas.map((l) => `<option value="${l.id}"${String(f.linea_id) === String(l.id) ? ' selected' : ''}>${esc(l.nombre)}</option>`).join('')}
+      </select>` : ''}
+    ${estados ? `<select data-filtro="estado" aria-label="Estado">
+        <option value="">Todos los estados</option>
+        ${estados.map((o) => `<option value="${o.v}"${f.estado === o.v ? ' selected' : ''}>${esc(o.t)}</option>`).join('')}
+      </select>` : ''}
+    ${buscar ? `<input type="search" data-filtro="q" value="${esc(f.q)}" placeholder="Buscar concepto…" aria-label="Buscar">` : ''}
+    ${f.linea_id || f.estado || f.q ? '<button class="btn-linea" id="btn-limpiar">Limpiar filtros</button>' : ''}
+    ${extra}
+  </div>`;
+}
+
 /* ---------------------------------- vistas -------------------------------- */
 
 async function vistaPanel() {
@@ -327,30 +530,37 @@ async function vistaPanel() {
           </div>`
         )
         .join('')
-    : '<p class="vacio">Sin movimientos en este mes. Registra un ingreso para empezar.</p>';
+    : '<p class="vacio">Sin movimientos de caja este mes. Registra un ingreso para empezar.</p>';
+
+  const filaPendiente = (c, tipo) => `<div class="fila">
+      <span class="fila-principal">${esc(c.cliente || c.proveedor || c.concepto)}</span>
+      <span class="fila-monto num">${pesos(c.saldo)}</span>
+      <span class="fila-detalle">${esc(c.linea || 'General')} · ${c.dias} días · ${esc(c.fecha)}${
+        c.abonado ? ` · abonado ${pesos(c.abonado)} de ${pesos(c.monto)}` : ''
+      } ${c.estado === 'parcial' ? marcaEstado('parcial') : ''}</span>
+      <span class="fila-acciones">
+        <button class="btn-mini" data-abonos="${tipo}:${c.id}">Abonos</button>
+        <button class="btn-mini" data-pagar="${tipo}:${c.id}">${tipo === 'ingreso' ? 'Cobrado' : 'Pagado'}</button>
+      </span>
+    </div>`;
 
   const cxcHtml = d.cxc.length
-    ? d.cxc
-        .map(
-          (c) => `<div class="fila">
-            <span class="fila-principal">${esc(c.cliente || c.concepto)}</span>
-            <span class="fila-monto num">${pesos(c.monto)}</span>
-            <span class="fila-detalle">${esc(c.linea || 'General')} · ${c.dias} días · ${esc(c.fecha)}</span>
-            <span class="fila-acciones"><button class="btn-mini" data-pagar="${c.id}">Marcar pagado</button></span>
-          </div>`
-        )
-        .join('')
+    ? d.cxc.map((c) => filaPendiente(c, 'ingreso')).join('')
     : '<p class="vacio">Nadie te debe plata. Bien ahí.</p>';
+
+  const cxpHtml = d.cxp.length
+    ? d.cxp.map((c) => filaPendiente(c, 'gasto')).join('')
+    : '<p class="vacio">No le debes nada a nadie.</p>';
 
   const fijosHtml = d.gastosFijos.length
     ? d.gastosFijos
         .map(
           (g) => `<div class="fila"><span class="fila-principal">${esc(g.concepto)}</span>
             <span class="fila-monto num">${pesos(g.monto)}</span>
-            <span class="fila-detalle">${esc(g.categoria)} · ${esc(g.linea || 'General')}</span></div>`
+            <span class="fila-detalle">${esc(g.categoria)} · ${esc(g.linea || 'General')} ${g.estado !== 'pagado' ? marcaEstado(g.estado, ETIQUETA_ESTADO_GASTO) : ''}</span></div>`
         )
         .join('')
-    : '<p class="vacio">No has marcado gastos fijos este mes.</p>';
+    : '<p class="vacio">No has marcado gastos fijos este mes. Si se repiten, créalos en <b>Pagos fijos</b> y se registran solos.</p>';
 
   const alertas = d.alertasStock.length
     ? `<div class="bloque"><div class="bloque-titulo"><h2>Stock bajo</h2></div>
@@ -362,7 +572,7 @@ async function vistaPanel() {
     <div class="bloque utilidad">
       <div class="bloque-titulo">
         <span class="utilidad-etiqueta">Utilidad neta · ${esc(nombreMes(estado.mes))}</span>
-        <input class="mes-select" type="month" id="mes" value="${estado.mes}">
+        <input class="mes-select" type="month" data-filtro="mes" value="${estado.mes}">
       </div>
       <p class="utilidad-cifra num ${u.utilidad >= 0 ? 'positiva' : 'negativa'}" data-contar="${u.utilidad}">${pesos(u.utilidad)}</p>
       <p class="sub num">${dif >= 0 ? '+' : ''}${pesos(dif)} frente a ${esc(nombreMes(d.previo.mes))}</p>
@@ -370,6 +580,7 @@ async function vistaPanel() {
         <div class="balanza-fila"><span>Entró</span><span class="balanza-pista"><span class="balanza-barra" style="width:${(u.ingresos / total) * 100}%;background:var(--verde)"></span></span><strong class="num">${pesos(u.ingresos)}</strong></div>
         <div class="balanza-fila"><span>Salió</span><span class="balanza-pista"><span class="balanza-barra" style="width:${(u.gastos / total) * 100}%;background:var(--rojo)"></span></span><strong class="num">${pesos(u.gastos)}</strong></div>
       </div>
+      <p class="sub">Plata que de verdad se movió este mes. Lo facturado y no cobrado está abajo.</p>
     </div>
 
     <div class="bloque">
@@ -377,15 +588,23 @@ async function vistaPanel() {
       ${lineasHtml}
     </div>
 
-    <div class="bloque">
-      <div class="bloque-titulo"><h2>Quién te debe</h2><strong class="num">${pesos(d.cxcTotal)}</strong></div>
-      <div class="filas">${cxcHtml}</div>
+    <div class="dos-columnas">
+      <div class="bloque">
+        <div class="bloque-titulo"><h2>Quién te debe</h2><strong class="num monto-positivo">${pesos(d.cxcTotal)}</strong></div>
+        <div class="filas">${cxcHtml}</div>
+      </div>
+      <div class="bloque">
+        <div class="bloque-titulo"><h2>Lo que debes</h2><strong class="num monto-negativo">${pesos(d.cxpTotal)}</strong></div>
+        <div class="filas">${cxpHtml}</div>
+      </div>
     </div>
 
     <div class="bloque">
       <div class="bloque-titulo"><h2>Gastos fijos del mes</h2><strong class="num">${pesos(u.fijos)}</strong></div>
       <div class="filas">${fijosHtml}</div>
-      <p class="sub num" style="margin-top:12px">Ingresos recurrentes activos: ${pesos(d.mrr)} al mes${d.puntoEquilibrio ? ` · necesitas vender ${pesos(d.puntoEquilibrio)} para no perder` : ''}</p>
+      <p class="sub num" style="margin-top:12px">Entra fijo ${pesos(d.mrr)}/mes · sale fijo ${pesos(d.gastoFijoRecurrente)}/mes${
+        d.puntoEquilibrio ? ` · necesitas vender ${pesos(d.puntoEquilibrio)} para no perder` : ''
+      }</p>
     </div>
 
     ${alertas}
@@ -396,21 +615,15 @@ async function vistaPanel() {
     </div>`;
 }
 
-function filtrosHtml(extra = '') {
-  return `<div class="filtros">
-    <input type="month" id="f-mes" value="${estado.mes}">
-    <select id="f-linea">${opcionesLinea().map((o) => `<option value="${o.v}">${esc(o.t)}</option>`).join('')}</select>
-    ${extra}
-  </div>`;
-}
-
 async function vistaIngresos() {
-  const filas = await api('GET', `/ingresos?mes=${estado.mes}`);
-  const total = filas.filter((f) => f.estado === 'pagado').reduce((a, b) => a + b.monto, 0);
+  const filas = await api('GET', '/ingresos?' + consulta());
+  const cobrado = filas.reduce((a, b) => a + b.abonado, 0);
+  const porCobrar = filas.reduce((a, b) => a + (b.monto - b.abonado), 0);
   return `
-    ${filtrosHtml()}
+    ${filtrosHtml({ estados: [{ v: 'pagado', t: 'Pagados' }, { v: 'parcial', t: 'Abonados' }, { v: 'pendiente', t: 'Por cobrar' }] })}
     <div class="bloque">
-      <div class="bloque-titulo"><h2>Ingresos de ${esc(nombreMes(estado.mes))}</h2><strong class="num monto-positivo">${pesos(total)}</strong></div>
+      <div class="bloque-titulo"><h2>Ingresos de ${esc(nombreMes(estado.mes))}</h2><strong class="num monto-positivo">${pesos(cobrado)}</strong></div>
+      <p class="sub num">Cobrado ${pesos(cobrado)} · por cobrar ${pesos(porCobrar)} · facturado ${pesos(cobrado + porCobrar)}</p>
       <div class="filas">${
         filas.length
           ? filas
@@ -418,29 +631,35 @@ async function vistaIngresos() {
                 (f) => `<div class="fila">
                   <span class="fila-principal">${esc(f.concepto)}</span>
                   <span class="fila-monto num">${pesos(f.monto)}</span>
-                  <span class="fila-detalle">${esc(f.fecha)} · ${esc(nombreLinea(f.linea_id))}${f.cliente_id ? ' · ' + esc(nombreCliente(f.cliente_id)) : ''} <span class="marca-estado estado-${f.estado}">${f.estado === 'pagado' ? 'pagado' : 'por cobrar'}</span></span>
+                  <span class="fila-detalle">${esc(f.fecha)} · ${esc(nombreLinea(f.linea_id))}${f.cliente_id ? ' · ' + esc(nombreCliente(f.cliente_id)) : ''} ${marcaEstado(f.estado)}${
+                    f.estado === 'parcial' ? ` <span class="num">${pesos(f.abonado)} de ${pesos(f.monto)}</span>` : ''
+                  }${f.iva ? ` · IVA ${pesos(f.iva)}` : ''}${f.rete ? ` · ret. ${pesos(f.rete)}` : ''}${
+                    f.moneda && f.moneda !== 'COP' ? ` · ${f.monto_origen} ${esc(f.moneda)}` : ''
+                  }</span>
                   <span class="fila-acciones">
-                    ${f.estado === 'pendiente' ? `<button class="btn-mini" data-pagar="${f.id}">Cobrado</button>` : ''}
+                    ${f.estado !== 'pagado' ? `<button class="btn-mini" data-pagar="ingreso:${f.id}">Cobrado</button>` : ''}
+                    <button class="btn-mini" data-abonos="ingreso:${f.id}">Abonos</button>
                     <button class="btn-mini" data-editar="ingresos:${f.id}">Editar</button>
                     <button class="btn-mini" data-borrar="ingresos:${f.id}">Borrar</button>
                   </span>
                 </div>`
               )
               .join('')
-          : '<p class="vacio">Aún no hay ingresos este mes.</p>'
+          : '<p class="vacio">Nada que mostrar con esos filtros.</p>'
       }</div>
     </div>`;
 }
 
 async function vistaGastos() {
-  const filas = await api('GET', `/gastos?mes=${estado.mes}`);
+  const filas = await api('GET', '/gastos?' + consulta());
   const total = filas.reduce((a, b) => a + b.monto, 0);
   const fijos = filas.filter((f) => f.tipo === 'fijo').reduce((a, b) => a + b.monto, 0);
+  const debes = filas.reduce((a, b) => a + (b.monto - b.abonado), 0);
   return `
-    ${filtrosHtml()}
+    ${filtrosHtml({ estados: [{ v: 'pagado', t: 'Pagados' }, { v: 'parcial', t: 'Abonados' }, { v: 'pendiente', t: 'Por pagar' }] })}
     <div class="bloque">
       <div class="bloque-titulo"><h2>Gastos de ${esc(nombreMes(estado.mes))}</h2><strong class="num monto-negativo">${pesos(total)}</strong></div>
-      <p class="sub num">Fijos ${pesos(fijos)} · variables ${pesos(total - fijos)}</p>
+      <p class="sub num">Fijos ${pesos(fijos)} · variables ${pesos(total - fijos)} · sin pagar ${pesos(debes)}</p>
       <div class="filas">${
         filas.length
           ? filas
@@ -448,15 +667,19 @@ async function vistaGastos() {
                 (f) => `<div class="fila">
                   <span class="fila-principal">${esc(f.concepto)}</span>
                   <span class="fila-monto num">${pesos(f.monto)}</span>
-                  <span class="fila-detalle">${esc(f.fecha)} · ${esc(f.categoria)} · ${esc(nombreLinea(f.linea_id))} · ${esc(f.tipo)}</span>
+                  <span class="fila-detalle">${esc(f.fecha)} · ${esc(f.categoria)} · ${esc(nombreLinea(f.linea_id))} · ${esc(f.tipo)} ${marcaEstado(f.estado, ETIQUETA_ESTADO_GASTO)}${
+                    f.estado === 'parcial' ? ` <span class="num">${pesos(f.abonado)} de ${pesos(f.monto)}</span>` : ''
+                  }${f.iva ? ` · IVA ${pesos(f.iva)}` : ''}${f.moneda && f.moneda !== 'COP' ? ` · ${f.monto_origen} ${esc(f.moneda)}` : ''}</span>
                   <span class="fila-acciones">
+                    ${f.estado !== 'pagado' ? `<button class="btn-mini" data-pagar="gasto:${f.id}">Pagado</button>` : ''}
+                    <button class="btn-mini" data-abonos="gasto:${f.id}">Abonos</button>
                     <button class="btn-mini" data-editar="gastos:${f.id}">Editar</button>
                     <button class="btn-mini" data-borrar="gastos:${f.id}">Borrar</button>
                   </span>
                 </div>`
               )
               .join('')
-          : '<p class="vacio">Ningún gasto registrado este mes.</p>'
+          : '<p class="vacio">Nada que mostrar con esos filtros.</p>'
       }</div>
     </div>`;
 }
@@ -466,10 +689,11 @@ async function vistaSuscripciones() {
   const mrr = filas.filter((f) => f.activa).reduce((a, b) => a + (b.ciclo === 'anual' ? b.monto / 12 : b.monto), 0);
   return `
     <div class="bloque">
-      <div class="bloque-titulo"><h2>Cobros recurrentes</h2><strong class="num">${pesos(mrr)}/mes</strong></div>
+      <div class="bloque-titulo"><h2>Lo que te entra fijo</h2><strong class="num monto-positivo">${pesos(mrr)}/mes</strong></div>
+      <p class="sub">Las mensualidades de tus clientes. Cuando se vencen se convierten solas en cuentas por cobrar.</p>
       <div class="filtros">
         <button class="btn-linea" id="btn-generar">Generar cobros vencidos</button>
-        <button class="btn-linea" data-nuevo="suscripciones">Nueva suscripción</button>
+        <button class="btn-linea" data-nuevo="suscripciones">Nuevo cobro recurrente</button>
       </div>
       <div class="filas">${
         filas.length
@@ -478,9 +702,11 @@ async function vistaSuscripciones() {
                 (f) => `<div class="fila">
                   <span class="fila-principal">${esc(f.concepto)}</span>
                   <span class="fila-monto num">${pesos(f.monto)}</span>
-                  <span class="fila-detalle">${esc(nombreCliente(f.cliente_id) || 'Sin cliente')} · ${esc(nombreLinea(f.linea_id))} · ${esc(f.ciclo)} · próximo ${esc(f.proxima_fecha)} ${f.activa ? '' : '<span class="marca-estado estado-alerta">cancelada</span>'}</span>
+                  <span class="fila-detalle">${esc(nombreCliente(f.cliente_id) || 'Sin cliente')} · ${esc(nombreLinea(f.linea_id))} · ${esc(f.ciclo)} · próximo ${esc(f.proxima_fecha)}${
+                    f.iva_pct ? ` · IVA ${pct1(f.iva_pct)}%` : ''
+                  } ${f.activa ? '' : '<span class="marca-estado estado-alerta">cancelada</span>'}</span>
                   <span class="fila-acciones">
-                    <button class="btn-mini" data-cobrar="${f.id}">Cobrar</button>
+                    ${f.activa ? `<button class="btn-mini" data-cobrar="${f.id}">Cobrar</button>` : ''}
                     <button class="btn-mini" data-editar="suscripciones:${f.id}">Editar</button>
                     <button class="btn-mini" data-borrar="suscripciones:${f.id}">Borrar</button>
                   </span>
@@ -492,13 +718,46 @@ async function vistaSuscripciones() {
     </div>`;
 }
 
+async function vistaRecurrentes() {
+  const filas = await api('GET', '/gastos_recurrentes');
+  const fijo = filas.filter((f) => f.activa).reduce((a, b) => a + (b.ciclo === 'anual' ? b.monto / 12 : b.monto), 0);
+  return `
+    <div class="bloque">
+      <div class="bloque-titulo"><h2>Lo que te sale fijo</h2><strong class="num monto-negativo">${pesos(fijo)}/mes</strong></div>
+      <p class="sub">El VPS, los dominios, las APIs. Se registran solos cada mes como cuentas por pagar, así el punto de equilibrio no se te queda corto por olvido.</p>
+      <div class="filtros">
+        <button class="btn-linea" id="btn-generar-gastos">Generar pagos vencidos</button>
+        <button class="btn-linea" data-nuevo="gastos_recurrentes">Nuevo pago fijo</button>
+      </div>
+      <div class="filas">${
+        filas.length
+          ? filas
+              .map(
+                (f) => `<div class="fila">
+                  <span class="fila-principal">${esc(f.concepto)}</span>
+                  <span class="fila-monto num">${pesos(f.monto)}${f.moneda !== 'COP' ? ` <span class="sub">${esc(f.moneda)}</span>` : ''}</span>
+                  <span class="fila-detalle">${esc(f.categoria)} · ${esc(nombreLinea(f.linea_id))} · ${esc(f.ciclo)} · próximo ${esc(f.proxima_fecha)}${
+                    f.proveedor ? ' · ' + esc(f.proveedor) : ''
+                  } ${f.activa ? '' : '<span class="marca-estado estado-alerta">pausado</span>'}</span>
+                  <span class="fila-acciones">
+                    <button class="btn-mini" data-editar="gastos_recurrentes:${f.id}">Editar</button>
+                    <button class="btn-mini" data-borrar="gastos_recurrentes:${f.id}">Borrar</button>
+                  </span>
+                </div>`
+              )
+              .join('')
+          : '<p class="vacio">Agrega el VPS, los dominios y las APIs que pagas todos los meses.</p>'
+      }</div>
+    </div>`;
+}
+
 async function vistaVentas() {
-  const filas = await api('GET', `/ventas?mes=${estado.mes}`);
+  const filas = await api('GET', '/ventas?' + consulta());
   const total = filas.reduce((a, b) => a + b.total, 0);
   const costoTotal = filas.reduce((a, b) => a + b.costo_unitario * b.cantidad, 0);
   const margen = total - costoTotal;
   return `
-    ${filtrosHtml()}
+    ${filtrosHtml({ buscar: false, estados: [{ v: 'pagado', t: 'Pagadas' }, { v: 'parcial', t: 'Abonadas' }, { v: 'pendiente', t: 'Por cobrar' }] })}
     <div class="bloque">
       <div class="bloque-titulo"><h2>Ventas de ${esc(nombreMes(estado.mes))}</h2><strong class="num">${pesos(total)}</strong></div>
       <p class="sub num">Costo ${pesos(costoTotal)} · Utilidad <b class="${margen >= 0 ? 'monto-positivo' : 'monto-negativo'}">${pesos(margen)}</b>${total ? ` · margen ${pct1((margen / total) * 100)}% sobre venta` : ''}</p>
@@ -511,20 +770,25 @@ async function vistaVentas() {
                 return `<div class="fila">
                   <span class="fila-principal">${f.cantidad} × ${esc(nombreProducto(f.producto_id) || 'producto')}</span>
                   <span class="fila-monto num">${pesos(f.total)}</span>
-                  <span class="fila-detalle">${esc(f.fecha)} · ${esc(nombreCliente(f.cliente_id) || 'mostrador')} · ${esc(f.metodo)} <span class="marca-estado estado-${f.estado}">${f.estado === 'pagado' ? 'pagada' : 'por cobrar'}</span></span>
+                  <span class="fila-detalle">${esc(f.fecha)} · ${esc(nombreCliente(f.cliente_id) || 'mostrador')} · ${esc(f.metodo)} ${marcaEstado(f.estado)}</span>
                   <span class="fila-detalle num" style="grid-column:1/-1">Costo unit. ${pesos(f.costo_unitario)} · Venta unit. ${pesos(f.precio_unitario)} · Utilidad <b class="${util >= 0 ? 'monto-positivo' : 'monto-negativo'}">${pesos(util)}</b>${f.precio_unitario ? ` · ${pct1(margenSobreVenta(f.precio_unitario, f.costo_unitario))}% margen` : ''}</span>
                   <span class="fila-acciones"><button class="btn-mini" data-borrar="ventas:${f.id}">Borrar</button></span>
                 </div>`;
               })
               .join('')
-          : '<p class="vacio">Sin ventas físicas este mes.</p>'
+          : '<p class="vacio">Sin ventas físicas con esos filtros.</p>'
       }</div>
     </div>`;
 }
 
 async function vistaInventario() {
-  const filas = await api('GET', '/productos');
+  const [filas, movs] = await Promise.all([
+    api('GET', '/productos'),
+    api('GET', '/movimientos?limit=60' + (estado.filtro.producto_id ? '&producto_id=' + estado.filtro.producto_id : '')),
+  ]);
   const valor = filas.reduce((a, b) => a + b.stock * b.costo_unitario, 0);
+  const signo = { entrada: '+', salida: '−', ajuste: '=' };
+
   return `
     <div class="bloque">
       <div class="bloque-titulo"><h2>Inventario</h2><strong class="num">${pesos(valor)} en stock</strong></div>
@@ -539,6 +803,8 @@ async function vistaInventario() {
                   <span class="fila-detalle num">Costo ${pesos(p.costo_unitario)} · venta ${pesos(p.precio_venta)} · margen ${pesos(p.precio_venta - p.costo_unitario)} (${pct1(margenSobreVenta(p.precio_venta, p.costo_unitario))}% s/venta · ${pct1(margenSobreCosto(p.precio_venta, p.costo_unitario))}% s/costo) ${p.stock <= p.stock_minimo ? '<span class="marca-estado estado-alerta">bajo</span>' : ''}</span>
                   <span class="fila-acciones">
                     <button class="btn-mini" data-entrada="${p.id}">Entrada</button>
+                    <button class="btn-mini" data-ajuste="${p.id}">Ajustar</button>
+                    <button class="btn-mini" data-kardex="${p.id}">Kardex</button>
                     <button class="btn-mini" data-editar="productos:${p.id}">Editar</button>
                     <button class="btn-mini" data-borrar="productos:${p.id}">Borrar</button>
                   </span>
@@ -547,12 +813,36 @@ async function vistaInventario() {
               .join('')
           : '<p class="vacio">Agrega tus tarjetas NFC, standees o repuestos para controlar el stock.</p>'
       }</div>
+    </div>
+
+    <div class="bloque">
+      <div class="bloque-titulo">
+        <h2>Kardex${estado.filtro.producto_id ? ' · ' + esc(nombreProducto(Number(estado.filtro.producto_id))) : ''}</h2>
+        ${estado.filtro.producto_id ? '<button class="btn-linea" id="btn-todo-kardex">Ver todo</button>' : ''}
+      </div>
+      <p class="sub">Cada entrada, salida y ajuste del inventario, con su rastro.</p>
+      <div class="filas">${
+        movs.length
+          ? movs
+              .map(
+                (m) => `<div class="fila fila-compacta">
+                  <span class="fila-principal">${esc(m.producto || 'producto borrado')}</span>
+                  <span class="fila-monto num">${signo[m.tipo] || ''}${Math.abs(m.cantidad)} <span class="sub">u.</span></span>
+                  <span class="fila-detalle">${esc(m.fecha)} · ${esc(m.tipo)} · costo ${pesos(m.costo_unitario)}${m.nota ? ' · ' + esc(m.nota) : ''}${
+                    m.venta_id ? ` · venta #${m.venta_id}` : ''
+                  }${m.gasto_id ? ` · gasto #${m.gasto_id}` : ''}</span>
+                </div>`
+              )
+              .join('')
+          : '<p class="vacio">Sin movimientos de inventario todavía.</p>'
+      }</div>
     </div>`;
 }
 
 async function vistaClientes() {
-  const filas = await api('GET', '/clientes');
+  const filas = await api('GET', '/clientes' + (estado.filtro.q ? '?q=' + encodeURIComponent(estado.filtro.q) : ''));
   return `
+    ${filtrosHtml({ mes: false, linea: false })}
     <div class="bloque">
       <div class="bloque-titulo"><h2>Clientes</h2><span class="sub">${filas.length}</span></div>
       <div class="filtros"><button class="btn-linea" data-nuevo="clientes">Nuevo cliente</button></div>
@@ -580,13 +870,14 @@ async function vistaLineas() {
   return `
     <div class="bloque">
       <div class="bloque-titulo"><h2>Líneas de negocio</h2></div>
-      <p class="sub">Cada app, servicio o producto que vendes. Todo ingreso y gasto se cuelga de una línea para saber cuál te deja plata.</p>
+      <p class="sub">Cada app, servicio o producto que vendes. Todo ingreso y gasto se cuelga de una línea para saber cuál te deja plata. <b>Archiva</b> en vez de borrar: borrar una línea con movimientos cambiaría los reportes de meses que ya diste por cerrados.</p>
       <div class="filtros"><button class="btn-linea" data-nuevo="lineas">Nueva línea</button></div>
       <div class="filas">${filas
         .map(
           (l) => `<div class="fila">
             <span class="fila-principal"><i class="punto" style="background:${esc(l.color)};display:inline-block;margin-right:8px"></i>${esc(l.nombre)}</span>
             <span class="fila-acciones">
+              <button class="btn-mini" data-archivar="${l.id}:${l.activa ? 0 : 1}">${l.activa ? 'Archivar' : 'Reactivar'}</button>
               <button class="btn-mini" data-editar="lineas:${l.id}">Editar</button>
               <button class="btn-mini" data-borrar="lineas:${l.id}">Borrar</button>
             </span>
@@ -602,15 +893,26 @@ async function vistaReportes() {
   const hasta = new Date(new Date(estado.mes + '-01T12:00:00').setMonth(new Date(estado.mes + '-01T12:00:00').getMonth() + 1) - 864e5)
     .toISOString()
     .slice(0, 10);
-  const [anio, cat, prod] = await Promise.all([
+  const [anio, cat, prod, imp, cartera] = await Promise.all([
     api('GET', `/reportes/lineas?desde=${estado.mes.slice(0, 4)}-01-01&hasta=${estado.mes.slice(0, 4)}-12-31`),
     api('GET', `/reportes/categorias?desde=${desde}&hasta=${hasta}`),
     api('GET', '/reportes/productos'),
+    api('GET', `/reportes/impuestos?mes=${estado.mes}`),
+    api('GET', '/reportes/cartera'),
   ]);
   const totalAnio = anio.reduce((a, b) => a + b.ingresos, 0);
 
+  const tramos = (c) => `
+    <div class="tramos">
+      <div><span>Al día</span><b class="num">${pesos(c.alDia)}</b></div>
+      <div><span>1–30 d</span><b class="num">${pesos(c.d1a30)}</b></div>
+      <div><span>31–60 d</span><b class="num">${pesos(c.d31a60)}</b></div>
+      <div><span>61–90 d</span><b class="num">${pesos(c.d61a90)}</b></div>
+      <div><span>+90 d</span><b class="num monto-negativo">${pesos(c.mas90)}</b></div>
+    </div>`;
+
   return `
-    ${filtrosHtml()}
+    ${filtrosHtml({ linea: false, buscar: false })}
     <div class="bloque">
       <div class="bloque-titulo"><h2>Año ${esc(estado.mes.slice(0, 4))} por línea</h2><strong class="num">${pesos(totalAnio)}</strong></div>
       <div class="filas">${anio
@@ -618,10 +920,30 @@ async function vistaReportes() {
           (l) => `<div class="fila">
             <span class="fila-principal">${esc(l.nombre)}</span>
             <span class="fila-monto num ${l.margen >= 0 ? 'monto-positivo' : 'monto-negativo'}">${pesos(l.margen)}</span>
-            <span class="fila-detalle num">Entró ${pesos(l.ingresos)} · gastó ${pesos(l.gastos)} · por cobrar ${pesos(l.por_cobrar)}${l.gastos > 0 ? ` · ${l.pct}% margen` : ''}</span>
+            <span class="fila-detalle num">Entró ${pesos(l.ingresos)} · gastó ${pesos(l.gastos)} · por cobrar ${pesos(l.por_cobrar)} · por pagar ${pesos(l.por_pagar)}${l.gastos > 0 ? ` · ${l.pct}% margen` : ''}</span>
           </div>`
         )
         .join('')}</div>
+    </div>
+
+    <div class="bloque">
+      <div class="bloque-titulo"><h2>IVA y retenciones</h2><span class="sub">${esc(nombreMes(estado.mes))}</span></div>
+      <p class="sub">Se causan con la fecha del documento, no con la del pago.</p>
+      <div class="filas">
+        <div class="fila"><span class="fila-principal">IVA generado (ventas)</span><span class="fila-monto num">${pesos(imp.ivaGenerado)}</span><span class="fila-detalle num">sobre base ${pesos(imp.baseVentas)}</span></div>
+        <div class="fila"><span class="fila-principal">IVA descontable (compras)</span><span class="fila-monto num">${pesos(imp.ivaDescontable)}</span><span class="fila-detalle num">sobre base ${pesos(imp.baseCompras)}</span></div>
+        <div class="fila"><span class="fila-principal"><b>Saldo de IVA</b></span><span class="fila-monto num ${imp.saldoIva >= 0 ? 'monto-negativo' : 'monto-positivo'}">${pesos(imp.saldoIva)}</span><span class="fila-detalle">${imp.saldoIva >= 0 ? 'te toca pagarlo' : 'queda a tu favor'}</span></div>
+        <div class="fila"><span class="fila-principal">Retención que te practicaron</span><span class="fila-monto num">${pesos(imp.reteSufrida)}</span><span class="fila-detalle">la descuentas en tu declaración de renta</span></div>
+        <div class="fila"><span class="fila-principal">Retención que practicaste</span><span class="fila-monto num">${pesos(imp.retePracticada)}</span><span class="fila-detalle">se la debes a la DIAN</span></div>
+      </div>
+    </div>
+
+    <div class="bloque">
+      <div class="bloque-titulo"><h2>Cartera por antigüedad</h2><span class="sub">al ${esc(cartera.hoy)}</span></div>
+      <p class="sub">Te deben <b class="num monto-positivo">${pesos(cartera.porCobrar.total)}</b></p>
+      ${tramos(cartera.porCobrar)}
+      <p class="sub" style="margin-top:14px">Debes <b class="num monto-negativo">${pesos(cartera.porPagar.total)}</b></p>
+      ${tramos(cartera.porPagar)}
     </div>
 
     <div class="bloque">
@@ -632,7 +954,7 @@ async function vistaReportes() {
               .map(
                 (c) => `<div class="fila"><span class="fila-principal">${esc(c.categoria)}</span>
                   <span class="fila-monto num">${pesos(c.total)}</span>
-                  <span class="fila-detalle">${c.n} registros · ${esc(c.tipo)}</span></div>`
+                  <span class="fila-detalle">${c.n} registros · ${esc(c.tipo)}${c.saldo ? ` · sin pagar ${pesos(c.saldo)}` : ''}</span></div>`
               )
               .join('')
           : '<p class="vacio">Sin gastos en el mes.</p>'
@@ -656,11 +978,56 @@ async function vistaReportes() {
 
     <div class="bloque">
       <div class="bloque-titulo"><h2>Descargar datos</h2></div>
+      <p class="sub">Los CSV salen con los filtros de mes y línea que tengas puestos. El respaldo completo se lo puedes volver a cargar al sistema.</p>
       <div class="filtros">
-        ${['ingresos', 'gastos', 'ventas', 'clientes', 'suscripciones', 'productos']
-          .map((t) => `<a class="btn-linea" href="/api/export/${t}.csv">${t}.csv</a>`)
+        ${['ingresos', 'gastos', 'abonos', 'ventas', 'movimientos', 'clientes', 'suscripciones', 'gastos_recurrentes', 'productos', 'bitacora']
+          .map((t) => `<a class="btn-linea" href="/api/export/${t}.csv?${consulta()}" download>${t}.csv</a>`)
           .join('')}
+        <a class="btn-linea" href="/api/backup?descargar=1" download>respaldo completo .json</a>
       </div>
+    </div>`;
+}
+
+async function vistaPapelera() {
+  const [filas, log] = await Promise.all([api('GET', '/papelera'), api('GET', '/bitacora?limit=80')]);
+  return `
+    <div class="bloque">
+      <div class="bloque-titulo"><h2>Papelera</h2><span class="sub">${filas.length}</span></div>
+      <p class="sub">Lo que borras cae aquí con todo lo que colgaba de ello. Restaurar una venta devuelve su ingreso, sus abonos y vuelve a descontar el stock.</p>
+      <div class="filas">${
+        filas.length
+          ? filas
+              .map(
+                (p) => `<div class="fila">
+                  <span class="fila-principal">${esc(p.resumen)}</span>
+                  <span class="fila-monto"><span class="marca-estado estado-pendiente">${esc(p.tabla)}</span></span>
+                  <span class="fila-detalle">#${p.registro_id} · borrado por ${esc(p.usuario || '—')} · ${esc(p.creado)}</span>
+                  <span class="fila-acciones">
+                    <button class="btn-mini" data-restaurar="${p.id}">Restaurar</button>
+                    <button class="btn-mini" data-purgar="${p.id}">Borrar del todo</button>
+                  </span>
+                </div>`
+              )
+              .join('')
+          : '<p class="vacio">La papelera está vacía.</p>'
+      }</div>
+    </div>
+
+    <div class="bloque">
+      <div class="bloque-titulo"><h2>Bitácora</h2><span class="sub">últimos ${log.length}</span></div>
+      <p class="sub">Quién tocó qué y cuándo.</p>
+      <div class="filas">${
+        log.length
+          ? log
+              .map(
+                (b) => `<div class="fila fila-compacta">
+                  <span class="fila-principal">${esc(b.accion)} · ${esc(b.tabla)}${b.registro_id ? ' #' + b.registro_id : ''}</span>
+                  <span class="fila-detalle">${esc(b.creado)} · ${esc(b.usuario || '—')}${b.detalle ? ' · ' + esc(b.detalle) : ''}</span>
+                </div>`
+              )
+              .join('')
+          : '<p class="vacio">Sin movimientos registrados.</p>'
+      }</div>
     </div>`;
 }
 
@@ -669,11 +1036,13 @@ const VISTA_FN = {
   ingresos: vistaIngresos,
   gastos: vistaGastos,
   suscripciones: vistaSuscripciones,
+  recurrentes: vistaRecurrentes,
   ventas: vistaVentas,
   inventario: vistaInventario,
   clientes: vistaClientes,
   lineas: vistaLineas,
   reportes: vistaReportes,
+  papelera: vistaPapelera,
 };
 
 /* --------------------------------- render --------------------------------- */
@@ -686,16 +1055,46 @@ function pintarNav() {
 
 async function cargarCatalogos() {
   const [lineas, clientes, productos] = await Promise.all([
-    api('GET', '/lineas'),
-    api('GET', '/clientes'),
-    api('GET', '/productos'),
+    api('GET', '/lineas?limit=2000'),
+    api('GET', '/clientes?limit=2000'),
+    api('GET', '/productos?limit=2000'),
   ]);
   estado.lineas = lineas;
   estado.clientes = clientes;
   estado.productos = productos;
 }
 
-async function render() {
+let temporizadorBusqueda = null;
+
+// Deja vivos los controles de filtro recién pintados.
+function cablearFiltros(cont) {
+  $$('[data-filtro]', cont).forEach((el) => {
+    const clave = el.dataset.filtro;
+    if (el.type === 'search') {
+      el.addEventListener('input', () => {
+        clearTimeout(temporizadorBusqueda);
+        temporizadorBusqueda = setTimeout(() => {
+          estado.filtro.q = el.value;
+          render({ devolverFoco: 'q' });
+        }, 350);
+      });
+    } else {
+      el.addEventListener('change', () => {
+        if (clave === 'mes') estado.mes = el.value || mesActual();
+        else estado.filtro[clave] = el.value;
+        render();
+      });
+    }
+  });
+  const limpiar = $('#btn-limpiar', cont);
+  if (limpiar)
+    limpiar.onclick = () => {
+      estado.filtro = { linea_id: '', estado: '', q: '', producto_id: '', categoria: '' };
+      render();
+    };
+}
+
+async function render(opciones = {}) {
   pintarNav();
   const cont = $('#vista');
   let hecho = false;
@@ -703,6 +1102,7 @@ async function render() {
     try {
       cont.innerHTML = await (VISTA_FN[estado.vista] || vistaPanel)();
       animarCifras(cont);
+      cablearFiltros(cont);
     } catch (e) {
       cont.innerHTML = `<div class="bloque"><p class="error">${esc(e.message)}</p></div>`;
     }
@@ -726,12 +1126,15 @@ async function render() {
     await pintar();
   }
   if (!hecho) await pintar();
-  const mes = $('#mes') || $('#f-mes');
-  if (mes)
-    mes.onchange = (ev) => {
-      estado.mes = ev.target.value || mesActual();
-      render();
-    };
+
+  // Al filtrar escribiendo, el cuadro se repinta: hay que devolver el cursor.
+  if (opciones.devolverFoco === 'q') {
+    const caja = $('[data-filtro="q"]', cont);
+    if (caja) {
+      caja.focus();
+      caja.setSelectionRange(caja.value.length, caja.value.length);
+    }
+  }
 }
 
 /* --------------------------- acciones especiales -------------------------- */
@@ -749,6 +1152,7 @@ function formularioVenta() {
       { k: 'cantidad', l: 'Cantidad', t: 'number', def: 1, req: true },
       { k: 'precio_unitario', l: 'Precio de venta unit.', t: 'number' },
       { k: 'costo_unitario', l: 'Costo unit. (vacío = del producto)', t: 'number' },
+      { k: 'iva_pct', l: 'IVA', t: 'select', opts: () => IVAS, def: 0 },
       { k: 'cliente_id', l: 'Cliente', t: 'select', opts: opcionesCliente },
       { k: 'metodo', l: 'Método', t: 'select', opts: () => METODOS, def: 'efectivo' },
       { k: 'estado', l: 'Estado', t: 'select', opts: () => [{ v: 'pagado', t: 'Pagada' }, { v: 'pendiente', t: 'Por cobrar' }], def: 'pagado' },
@@ -766,6 +1170,9 @@ function formularioEntrada(id) {
       { k: 'fecha', l: 'Fecha', t: 'date', def: hoy() },
       { k: 'cantidad', l: 'Cantidad', t: 'number', req: true },
       { k: 'costo_unitario', l: 'Costo unitario', t: 'number', def: p ? p.costo_unitario : 0 },
+      { k: 'iva_pct', l: 'IVA de la compra', t: 'select', opts: () => IVAS, def: 0 },
+      { k: 'estado', l: '¿Ya la pagaste?', t: 'select', opts: () => [{ v: 'pagado', t: 'Sí, ya la pagué' }, { v: 'pendiente', t: 'No, la debo' }], def: 'pagado' },
+      { k: 'metodo', l: 'Método', t: 'select', opts: () => METODOS, def: 'efectivo' },
       { k: 'proveedor', l: 'Proveedor', t: 'text', ancho: true },
       { k: 'nota', l: 'Nota', t: 'text', ancho: true },
     ],
@@ -773,25 +1180,81 @@ function formularioEntrada(id) {
   });
 }
 
+function formularioAjuste(id) {
+  const p = estado.productos.find((x) => x.id === Number(id));
+  abrirFormulario({
+    titulo: 'Ajustar stock de ' + (p ? p.nombre : 'producto'),
+    encabezado: `<p class="sub">El sistema dice que tienes <b>${p ? p.stock : '?'}</b>. Escribe lo que contaste de verdad y queda el ajuste en el kardex.</p>`,
+    campos: [
+      { k: 'stock', l: 'Stock contado', t: 'number', def: p ? p.stock : 0, req: true },
+      { k: 'fecha', l: 'Fecha', t: 'date', def: hoy() },
+      { k: 'nota', l: 'Motivo', t: 'text', ancho: true, def: 'Conteo físico' },
+    ],
+    alGuardar: (d) => api('POST', `/productos/${id}/ajuste`, d),
+  });
+}
+
 document.addEventListener('click', async (ev) => {
-  const t = ev.target.closest('[data-nuevo],[data-editar],[data-borrar],[data-pagar],[data-cobrar],[data-entrada],#btn-venta,#btn-generar');
+  const t = ev.target.closest(
+    '[data-nuevo],[data-editar],[data-borrar],[data-pagar],[data-cobrar],[data-entrada],[data-ajuste],[data-kardex],[data-abonos],[data-borrar-abono],[data-archivar],[data-restaurar],[data-purgar],#btn-venta,#btn-generar,#btn-generar-gastos,#btn-todo-kardex'
+  );
   if (!t) return;
   try {
     if (t.dataset.nuevo) return nuevo(t.dataset.nuevo);
     if (t.id === 'btn-venta') return formularioVenta();
     if (t.dataset.entrada) return formularioEntrada(t.dataset.entrada);
+    if (t.dataset.ajuste) return formularioAjuste(t.dataset.ajuste);
+    if (t.dataset.kardex) {
+      estado.filtro.producto_id = t.dataset.kardex;
+      return render();
+    }
+    if (t.id === 'btn-todo-kardex') {
+      estado.filtro.producto_id = '';
+      return render();
+    }
     if (t.dataset.editar) {
       const [tabla, id] = t.dataset.editar.split(':');
-      const fila = (await api('GET', `/${tabla}?limit=2000`)).find((x) => x.id === Number(id));
-      return editar(tabla, fila);
+      return editar(tabla, id);
     }
     if (t.dataset.borrar) {
       const [tabla, id] = t.dataset.borrar.split(':');
       return borrar(tabla, id);
     }
+    if (t.dataset.abonos) {
+      const [tipo, id] = t.dataset.abonos.split(':');
+      return abrirAbonos(tipo, id);
+    }
+    if (t.dataset.borrarAbono) {
+      const [abonoId, tipo, docId] = t.dataset.borrarAbono.split(':');
+      await api('DELETE', `/abonos/${abonoId}`);
+      aviso('Abono quitado');
+      await abrirAbonos(tipo, docId);
+      return render();
+    }
     if (t.dataset.pagar) {
-      await api('POST', `/ingresos/${t.dataset.pagar}/pagar`, { fecha: hoy() });
-      aviso('Marcado como pagado');
+      const [tipo, id] = t.dataset.pagar.split(':');
+      const tabla = tipo === 'ingreso' ? 'ingresos' : 'gastos';
+      await api('POST', `/${tabla}/${id}/pagar`, { fecha: hoy() });
+      aviso(tipo === 'ingreso' ? 'Cobrado' : 'Pagado');
+      return render();
+    }
+    if (t.dataset.archivar) {
+      const [id, activa] = t.dataset.archivar.split(':');
+      await api('PUT', `/lineas/${id}`, { activa: Number(activa) });
+      aviso(Number(activa) ? 'Línea reactivada' : 'Línea archivada');
+      await cargarCatalogos();
+      return render();
+    }
+    if (t.dataset.restaurar) {
+      await api('POST', `/papelera/${t.dataset.restaurar}/restaurar`, {});
+      aviso('Restaurado');
+      await cargarCatalogos();
+      return render();
+    }
+    if (t.dataset.purgar) {
+      if (!confirm('Esto sí es definitivo. ¿Borrarlo para siempre?')) return;
+      await api('DELETE', `/papelera/${t.dataset.purgar}`);
+      aviso('Borrado definitivo');
       return render();
     }
     if (t.dataset.cobrar) {
@@ -804,9 +1267,22 @@ document.addEventListener('click', async (ev) => {
       aviso(r.generados ? `${r.generados} cobros generados` : 'No había cobros vencidos');
       return render();
     }
+    if (t.id === 'btn-generar-gastos') {
+      const r = await api('POST', '/gastos-recurrentes/generar-vencidos', {});
+      aviso(r.gastosGenerados ? `${r.gastosGenerados} pagos generados` : 'No había pagos vencidos');
+      return render();
+    }
   } catch (e) {
     aviso(e.message);
   }
+});
+
+// El previo del total y las reglas de visibilidad del formulario, en vivo.
+document.addEventListener('input', (ev) => {
+  if (ev.target.closest('#modal-campos')) refrescarForm();
+});
+document.addEventListener('change', (ev) => {
+  if (ev.target.closest('#modal-campos')) refrescarForm();
 });
 
 /* --------------------------------- arranque ------------------------------- */
@@ -905,6 +1381,16 @@ document.addEventListener('keydown', (e) => e.key === 'Escape' && cerrarFormular
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+  // Si el SW trae una versión nueva del panel, recargar una sola vez.
+  // Solo si la página YA estaba controlada: en la primera visita el cambio
+  // de controlador es la instalación, no un despliegue nuevo.
+  const yaControlado = !!navigator.serviceWorker.controller;
+  let recargando = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!yaControlado || recargando) return;
+    recargando = true;
+    location.reload();
+  });
 }
 
 let promptInstalar = null;
