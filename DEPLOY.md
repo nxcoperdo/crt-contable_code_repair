@@ -243,6 +243,18 @@ Cron semanal (domingo 3am) — `crontab -e`:
 0 3 * * 0 sqlite3 /home/crt/crt-contable/data/crt.db ".backup '/home/crt/backups/crt-$(date +\%F).db'" && find /home/crt/backups -name 'crt-*.db' -mtime +60 -delete
 ```
 
+## 11B. Recordatorios de cartera por Telegram
+
+Resumen diario de cobros/pagos por vencer o ya vencidos, mandado al mismo bot de
+Telegram del backup off-site (define `TELEGRAM_TOKEN` / `TELEGRAM_CHAT` en
+`ecosystem.config.js` junto a las demás variables). Cron diario 8am:
+
+```cron
+0 8 * * * curl -s -X POST "http://127.0.0.1:4300/api/cron/recordatorios?key=$CRON_SECRET" > /dev/null
+```
+
+`CRON_SECRET` es la misma clave que ya usa el cron de suscripciones del paso 12.
+
 ## 12. (Opcional) Generar ingresos de suscripciones vencidas automáticamente
 
 El endpoint `POST /api/suscripciones/generar-vencidas` requiere sesión. Para automatizarlo

@@ -149,6 +149,7 @@ input,select,textarea{font:inherit}
   .btn-linea:hover{border-color:var(--azul);color:var(--azul);box-shadow:0 0 0 3px var(--azul-suave)}
   .btn-gasto:hover{box-shadow:0 0 0 3px var(--rojo-claro);border-color:var(--rojo)}
   .btn-mini:hover{color:var(--tinta);border-color:var(--azul);background:var(--azul-suave)}
+  .btn-whatsapp:hover{background:color-mix(in srgb, #25d366 15%, transparent);border-color:#25d366}
 }
 
 /* onda al pulsar (ripple) */
@@ -184,6 +185,10 @@ input,select,textarea{font:inherit}
   border-color:var(--borde);background:var(--superficie);font-size:14px;padding:10px 14px;color:var(--tinta);
 }
 .btn-gasto{background:var(--superficie);color:var(--rojo);border-color:color-mix(in srgb,var(--rojo) 45%,transparent);font-weight:600;flex:1}
+.btn-whatsapp{
+  display:inline-flex;align-items:center;justify-content:center;text-decoration:none;
+  color:#25d366;border-color:color-mix(in srgb, #25d366 45%, transparent);font-weight:600;
+}
 .btn-mini{
   font-size:13px;padding:8px 11px;min-height:36px;border:1px solid var(--borde);border-radius:9px;
   background:var(--superficie-2);color:var(--tinta-suave);

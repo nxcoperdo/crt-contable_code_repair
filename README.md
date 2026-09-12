@@ -87,6 +87,27 @@ las suscripciones vencidas en cuentas por cobrar **y** los pagos fijos vencidos 
 dominios, APIs) en cuentas por pagar. O entra al panel y aprieta "Generar cobros vencidos"
 en **Cobros** y "Generar pagos vencidos" en **Pagos fijos**.
 
+## Recordatorios de cartera
+
+Un resumen diario por Telegram de lo que está por vencer o ya venció (cuentas por cobrar
+y por pagar), para no tener que entrar al panel a acordarte. Reutiliza el mismo bot que
+manda el backup off-site (ver más abajo): define `TELEGRAM_TOKEN` y `TELEGRAM_CHAT`, y
+programa un cron diario (por ejemplo a las 8am):
+
+```bash
+crontab -e
+0 8 * * * curl -s -X POST "http://127.0.0.1:4300/api/cron/recordatorios?key=$CRON_SECRET" > /dev/null
+```
+
+`RECORDATORIOS_DIAS_ANTES` (por defecto 3) controla con cuántos días de anticipación
+avisa una cuenta próxima a vencer; lo ya vencido siempre se avisa. Si no hay nada
+pendiente en la ventana, no manda mensaje. También puedes mandarlo a mano desde el panel
+con el botón **Enviar recordatorios ahora** en el Panel, junto a "Quién te debe".
+
+Además, cada fila de "Quién te debe" que tenga un cliente con teléfono guardado trae un
+botón **WhatsApp** que abre un mensaje de cobro prellenado directo al cliente (no aplica
+a "Lo que debes": el proveedor es texto libre, sin teléfono).
+
 ## Respaldo
 
 La base es un solo archivo. Usa el script incluido:

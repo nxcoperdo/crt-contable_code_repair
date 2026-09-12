@@ -11,6 +11,7 @@ const ZONA = 'America/Bogota';
 const fmtDia = new Intl.DateTimeFormat('en-CA', { timeZone: ZONA, year: 'numeric', month: '2-digit', day: '2-digit' });
 const hoy = () => fmtDia.format(new Date());
 const mesActual = () => hoy().slice(0, 7);
+const diasEntre = (desde, hasta) => Math.round((Date.parse(hasta + 'T00:00:00Z') - Date.parse(desde + 'T00:00:00Z')) / 864e5);
 
 const pesos = (n) => '$' + new Intl.NumberFormat('es-CO').format(Math.round(n || 0));
 const corto = (n) => {
@@ -32,6 +33,26 @@ const pct1 = (n) => {
 const margenSobreVenta = (venta, costo) => (venta > 0 ? ((venta - costo) / venta) * 100 : 0);
 const margenSobreCosto = (venta, costo) => (costo > 0 ? ((venta - costo) / costo) * 100 : 0);
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+// Deja solo dígitos y antepone el indicativo de Colombia si hace falta (celular a 10 dígitos).
+const telefonoWhatsapp = (tel) => {
+  const digitos = String(tel || '').replace(/\D/g, '');
+  if (!digitos) return '';
+  return digitos.length === 10 ? '57' + digitos : digitos;
+};
+
+// Link de WhatsApp con el mensaje de cobro prellenado, o '' si el cliente no tiene teléfono.
+function enlaceRecordatorioWhatsapp(c) {
+  const numero = telefonoWhatsapp(c.telefono);
+  if (!numero) return '';
+  const dias = diasEntre(c.vence || c.fecha, hoy());
+  const vencimiento = dias > 0 ? `hace ${dias} día${dias === 1 ? '' : 's'}` : `en ${-dias} día${-dias === 1 ? '' : 's'}`;
+  const verbo = dias > 0 ? 'venció' : 'vence';
+  const mensaje =
+    `Hola ${c.cliente || ''}, te escribo de Code Repair Tech para recordarte el pago pendiente de ` +
+    `"${c.concepto}" por ${pesos(c.saldo)}, que ${verbo} ${vencimiento}. Cualquier duda me cuentas. ¡Gracias!`;
+  return `https://wa.me/${numero}?text=${encodeURIComponent(mensaje)}`;
+}
 
 const ETIQUETA_ESTADO = { pagado: 'pagado', parcial: 'abonado', pendiente: 'por cobrar' };
 const ETIQUETA_ESTADO_GASTO = { pagado: 'pagado', parcial: 'abonado', pendiente: 'por pagar' };
@@ -532,17 +553,21 @@ async function vistaPanel() {
         .join('')
     : '<p class="vacio">Sin movimientos de caja este mes. Registra un ingreso para empezar.</p>';
 
-  const filaPendiente = (c, tipo) => `<div class="fila">
+  const filaPendiente = (c, tipo) => {
+    const wa = tipo === 'ingreso' ? enlaceRecordatorioWhatsapp(c) : '';
+    return `<div class="fila">
       <span class="fila-principal">${esc(c.cliente || c.proveedor || c.concepto)}</span>
       <span class="fila-monto num">${pesos(c.saldo)}</span>
       <span class="fila-detalle">${esc(c.linea || 'General')} · ${c.dias} días · ${esc(c.fecha)}${
         c.abonado ? ` · abonado ${pesos(c.abonado)} de ${pesos(c.monto)}` : ''
       } ${c.estado === 'parcial' ? marcaEstado('parcial') : ''}</span>
       <span class="fila-acciones">
+        ${wa ? `<a class="btn-mini btn-whatsapp" href="${wa}" target="_blank" rel="noopener">WhatsApp</a>` : ''}
         <button class="btn-mini" data-abonos="${tipo}:${c.id}">Abonos</button>
         <button class="btn-mini" data-pagar="${tipo}:${c.id}">${tipo === 'ingreso' ? 'Cobrado' : 'Pagado'}</button>
       </span>
     </div>`;
+  };
 
   const cxcHtml = d.cxc.length
     ? d.cxc.map((c) => filaPendiente(c, 'ingreso')).join('')
@@ -598,6 +623,9 @@ async function vistaPanel() {
         <div class="filas">${cxpHtml}</div>
       </div>
     </div>
+    <p class="sub" style="text-align:right">
+      <button class="btn-mini" id="btn-recordatorios">Enviar recordatorios ahora (Telegram)</button>
+    </p>
 
     <div class="bloque">
       <div class="bloque-titulo"><h2>Gastos fijos del mes</h2><strong class="num">${pesos(u.fijos)}</strong></div>
@@ -1196,7 +1224,7 @@ function formularioAjuste(id) {
 
 document.addEventListener('click', async (ev) => {
   const t = ev.target.closest(
-    '[data-nuevo],[data-editar],[data-borrar],[data-pagar],[data-cobrar],[data-entrada],[data-ajuste],[data-kardex],[data-abonos],[data-borrar-abono],[data-archivar],[data-restaurar],[data-purgar],#btn-venta,#btn-generar,#btn-generar-gastos,#btn-todo-kardex'
+    '[data-nuevo],[data-editar],[data-borrar],[data-pagar],[data-cobrar],[data-entrada],[data-ajuste],[data-kardex],[data-abonos],[data-borrar-abono],[data-archivar],[data-restaurar],[data-purgar],#btn-venta,#btn-generar,#btn-generar-gastos,#btn-todo-kardex,#btn-recordatorios'
   );
   if (!t) return;
   try {
@@ -1271,6 +1299,11 @@ document.addEventListener('click', async (ev) => {
       const r = await api('POST', '/gastos-recurrentes/generar-vencidos', {});
       aviso(r.gastosGenerados ? `${r.gastosGenerados} pagos generados` : 'No había pagos vencidos');
       return render();
+    }
+    if (t.id === 'btn-recordatorios') {
+      const r = await api('POST', '/recordatorios/enviar', {});
+      aviso(r.enviado ? 'Resumen enviado a Telegram' : `No se envió: ${r.motivo}`);
+      return;
     }
   } catch (e) {
     aviso(e.message);

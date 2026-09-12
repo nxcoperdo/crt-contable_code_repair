@@ -150,6 +150,21 @@ app.post('/api/cron/suscripciones', (req, res) => {
   ok(res, () => ({ ...generarVencidas(req), ...generarGastosVencidos(req) }));
 });
 
+// Resumen diario de cartera (vencida o por vencer) por Telegram. Mismo patrón de auth.
+//   0 8 * * *  curl -s -X POST "http://127.0.0.1:4300/api/cron/recordatorios?key=$CRON_SECRET"
+app.post('/api/cron/recordatorios', async (req, res) => {
+  const key = req.query.key || req.get('x-cron-key');
+  if (!process.env.CRON_SECRET || key !== process.env.CRON_SECRET) {
+    return res.status(403).json({ error: 'clave de cron inválida' });
+  }
+  try {
+    res.json(await enviarRecordatorios());
+  } catch (e) {
+    console.error(e);
+    res.status(400).json({ error: e.message });
+  }
+});
+
 // Healthcheck sin sesión, para que el deploy y el monitoreo puedan sondearlo.
 app.get('/api/salud', (req, res) => res.json({ ok: true, hoy: hoy(), zona: ZONA }));
 
@@ -720,6 +735,90 @@ function generarGastosVencidos(req) {
 app.post('/api/suscripciones/generar-vencidas', (req, res) => ok(res, () => generarVencidas(req)));
 app.post('/api/gastos-recurrentes/generar-vencidos', (req, res) => ok(res, () => generarGastosVencidos(req)));
 
+/* --------------------------- recordatorios -------------------------------
+   Resumen diario de cartera (vencida o por vencer) mandado por Telegram.
+   Reusa el mismo bot que ya manda el backup off-site (scripts/backup.sh).
+-------------------------------------------------------------------------- */
+
+const pesosTxt = (n) => `$${Math.round(n).toLocaleString('es-CO')}`;
+const diasAntes = () => Number(process.env.RECORDATORIOS_DIAS_ANTES) || 3;
+
+function construirRecordatorios() {
+  const ahora = hoy();
+  const ventana = diasAntes();
+
+  const cobrar = db
+    .prepare(
+      `SELECT i.concepto, (i.monto - i.abonado) AS saldo, i.vence, i.fecha, c.nombre AS cliente
+       FROM ingresos i LEFT JOIN clientes c ON c.id = i.cliente_id
+       WHERE i.estado <> 'pagado'`
+    )
+    .all()
+    .map((r) => ({ ...r, dias: diasEntre(r.vence || r.fecha, ahora) }))
+    .filter((r) => r.dias > 0 || r.dias >= -ventana);
+
+  const pagar = db
+    .prepare(
+      `SELECT g.concepto, (g.monto - g.abonado) AS saldo, g.vence, g.fecha, g.proveedor
+       FROM gastos g WHERE g.estado <> 'pagado'`
+    )
+    .all()
+    .map((r) => ({ ...r, dias: diasEntre(r.vence || r.fecha, ahora) }))
+    .filter((r) => r.dias > 0 || r.dias >= -ventana);
+
+  if (!cobrar.length && !pagar.length) return null;
+
+  const linea = (nombre, r) =>
+    `• ${nombre || r.concepto} — ${r.concepto} — ${pesosTxt(r.saldo)} — ${
+      r.dias > 0 ? `vencida hace ${r.dias} día${r.dias === 1 ? '' : 's'}` : `vence en ${-r.dias} día${-r.dias === 1 ? '' : 's'}`
+    }`;
+
+  const bloques = [];
+  bloques.push(`📋 Cartera al ${ahora}`);
+  if (cobrar.length) {
+    bloques.push(`\n🔴 Por cobrar (${pesosTxt(cobrar.reduce((a, b) => a + b.saldo, 0))}):`);
+    bloques.push(...cobrar.map((r) => linea(r.cliente, r)));
+  }
+  if (pagar.length) {
+    bloques.push(`\n🟠 Por pagar (${pesosTxt(pagar.reduce((a, b) => a + b.saldo, 0))}):`);
+    bloques.push(...pagar.map((r) => linea(r.proveedor, r)));
+  }
+  return bloques.join('\n');
+}
+
+async function enviarTelegram(texto) {
+  const token = process.env.TELEGRAM_TOKEN;
+  const chat = process.env.TELEGRAM_CHAT;
+  if (!token || !chat) return { enviado: false, motivo: 'telegram no configurado' };
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chat_id: chat, text: texto }),
+    });
+    if (!r.ok) return { enviado: false, motivo: `telegram respondió ${r.status}` };
+    return { enviado: true };
+  } catch (e) {
+    return { enviado: false, motivo: e.message };
+  }
+}
+
+async function enviarRecordatorios() {
+  const texto = construirRecordatorios();
+  if (!texto) return { enviado: false, motivo: 'nada pendiente' };
+  return enviarTelegram(texto);
+}
+
+// Botón "Enviar recordatorios ahora" del panel, para probar sin esperar al cron.
+app.post('/api/recordatorios/enviar', async (req, res) => {
+  try {
+    res.json(await enviarRecordatorios());
+  } catch (e) {
+    console.error(e);
+    res.status(400).json({ error: e.message });
+  }
+});
+
 app.post('/api/suscripciones/:id/cobrar', (req, res) =>
   ok(res, () => {
     const id = entero(req.params.id);
@@ -938,7 +1037,7 @@ app.get('/api/reportes/panel', (req, res) =>
     const cxc = db
       .prepare(
         `SELECT i.id, i.fecha, i.concepto, i.monto, i.abonado, (i.monto - i.abonado) AS saldo, i.estado, i.vence,
-                c.nombre AS cliente, l.nombre AS linea
+                c.nombre AS cliente, c.telefono AS telefono, l.nombre AS linea
          FROM ingresos i
          LEFT JOIN clientes c ON c.id = i.cliente_id
          LEFT JOIN lineas l ON l.id = i.linea_id
