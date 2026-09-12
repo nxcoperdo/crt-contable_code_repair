@@ -165,6 +165,21 @@ app.post('/api/cron/recordatorios', async (req, res) => {
   }
 });
 
+// Empujón motivacional aparte, en su propio horario. Mismo patrón de auth.
+//   0 12 * * *  curl -s -X POST "http://127.0.0.1:4300/api/cron/motivacion?key=$CRON_SECRET"
+app.post('/api/cron/motivacion', async (req, res) => {
+  const key = req.query.key || req.get('x-cron-key');
+  if (!process.env.CRON_SECRET || key !== process.env.CRON_SECRET) {
+    return res.status(403).json({ error: 'clave de cron inválida' });
+  }
+  try {
+    res.json(await enviarMotivacion());
+  } catch (e) {
+    console.error(e);
+    res.status(400).json({ error: e.message });
+  }
+});
+
 // Healthcheck sin sesión, para que el deploy y el monitoreo puedan sondearlo.
 app.get('/api/salud', (req, res) => res.json({ ok: true, hoy: hoy(), zona: ZONA }));
 
@@ -803,9 +818,21 @@ async function enviarTelegram(texto) {
   }
 }
 
+// Cuando no hay nada vencido ni por vencer, en vez de quedarse callado manda
+// la utilidad del mes: siempre hay algo útil que decir.
+function construirResumenAlDia() {
+  const mes = mesDe(hoy());
+  const t = totalesMes(mes);
+  return [
+    '✅ Al día: nada pendiente por cobrar ni por pagar.',
+    '',
+    `${t.utilidad >= 0 ? '📈' : '📉'} Utilidad neta de ${mes}: ${pesosTxt(t.utilidad)}`,
+    `Entró ${pesosTxt(t.ingresos)} · Salió ${pesosTxt(t.gastos)}`,
+  ].join('\n');
+}
+
 async function enviarRecordatorios() {
-  const texto = construirRecordatorios();
-  if (!texto) return { enviado: false, motivo: 'nada pendiente' };
+  const texto = construirRecordatorios() || construirResumenAlDia();
   return enviarTelegram(texto);
 }
 
@@ -813,6 +840,41 @@ async function enviarRecordatorios() {
 app.post('/api/recordatorios/enviar', async (req, res) => {
   try {
     res.json(await enviarRecordatorios());
+  } catch (e) {
+    console.error(e);
+    res.status(400).json({ error: e.message });
+  }
+});
+
+/* ------------------------------ motivación --------------------------------
+   Un empujón aparte de la cartera: vender software, productos, campañas de
+   mensajes masivos. Se manda en un horario propio, independiente del de
+   cobros/pagos.
+-------------------------------------------------------------------------- */
+
+const FRASES_MOTIVACION = [
+  'Un cliente que no sabe que existes es una venta que no vas a hacer. Manda ese mensaje masivo hoy.',
+  'Cada producto que empaquetas una vez y vendes varias veces es tiempo que recuperas. ¿Qué puedes empaquetar hoy?',
+  '¿Ya le escribiste a un cliente viejo para ofrecerle algo nuevo? La venta más fácil es la que ya confía en ti.',
+  'GigantYA, Daemon Leads, AgroValor, NFC, webs, reparaciones: cada línea es una palanca. Empuja hoy la que más rápido responda.',
+  'El software se vende una vez y cobra todos los meses si es suscripción. ¿Cuál puedes volver recurrente esta semana?',
+  'Una campaña de mensajes masivos bien segmentada vale más que diez publicaciones sin dueño. Manda la de hoy.',
+  'No esperes a que te compren: ofrece primero. El próximo cliente está a un mensaje de distancia.',
+  'Cada gasto fijo que pagas es una razón más para vender hoy, no mañana.',
+  'Automatiza lo repetible, vende lo nuevo. Hoy es buen día para lanzar algo.',
+  'Un producto sin cliente es una idea. Un producto con un cliente pagando es un negocio. ¿A quién le vendes hoy?',
+];
+
+const mensajeMotivacional = () => FRASES_MOTIVACION[Math.floor(Math.random() * FRASES_MOTIVACION.length)];
+
+async function enviarMotivacion() {
+  return enviarTelegram(`💪 ${mensajeMotivacional()}`);
+}
+
+// Botón/prueba manual, con sesión.
+app.post('/api/motivacion/enviar', async (req, res) => {
+  try {
+    res.json(await enviarMotivacion());
   } catch (e) {
     console.error(e);
     res.status(400).json({ error: e.message });
