@@ -696,6 +696,20 @@ app.post('/api/gastos/:id/pagar', (req, res) =>
   ok(res, () => abonar(req, 'gastos', req.params.id, cuerpo(req)))
 );
 
+// Cobrar una venta es cobrar el ingreso que quedó ligado a ella: el estado
+// de la venta se sigue arrastrando desde ahí (ver recalcular()).
+app.post('/api/ventas/:id/cobrar', (req, res) =>
+  ok(res, () => {
+    const id = entero(req.params.id);
+    const venta = db.prepare('SELECT * FROM ventas WHERE id = ?').get(id);
+    if (!venta) throw new Error('Venta no encontrada');
+    const ingreso = db.prepare('SELECT * FROM ingresos WHERE venta_id = ?').get(id);
+    if (!ingreso) throw new Error('Esa venta no tiene un ingreso asociado');
+    abonar(req, 'ingresos', ingreso.id, cuerpo(req));
+    return db.prepare('SELECT * FROM ventas WHERE id = ?').get(id);
+  })
+);
+
 const avanzar = (fecha, ciclo) => sumarMeses(fecha, ciclo === 'anual' ? 12 : 1);
 
 function generarVencidas(req) {

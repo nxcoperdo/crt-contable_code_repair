@@ -800,7 +800,10 @@ async function vistaVentas() {
                   <span class="fila-monto num">${pesos(f.total)}</span>
                   <span class="fila-detalle">${esc(f.fecha)} · ${esc(nombreCliente(f.cliente_id) || 'mostrador')} · ${esc(f.metodo)} ${marcaEstado(f.estado)}</span>
                   <span class="fila-detalle num" style="grid-column:1/-1">Costo unit. ${pesos(f.costo_unitario)} · Venta unit. ${pesos(f.precio_unitario)} · Utilidad <b class="${util >= 0 ? 'monto-positivo' : 'monto-negativo'}">${pesos(util)}</b>${f.precio_unitario ? ` · ${pct1(margenSobreVenta(f.precio_unitario, f.costo_unitario))}% margen` : ''}</span>
-                  <span class="fila-acciones"><button class="btn-mini" data-borrar="ventas:${f.id}">Borrar</button></span>
+                  <span class="fila-acciones">
+                    ${f.estado !== 'pagado' ? `<button class="btn-mini" data-pagar="venta:${f.id}">Cobrado</button>` : ''}
+                    <button class="btn-mini" data-borrar="ventas:${f.id}">Borrar</button>
+                  </span>
                 </div>`;
               })
               .join('')
@@ -1261,9 +1264,9 @@ document.addEventListener('click', async (ev) => {
     }
     if (t.dataset.pagar) {
       const [tipo, id] = t.dataset.pagar.split(':');
-      const tabla = tipo === 'ingreso' ? 'ingresos' : 'gastos';
-      await api('POST', `/${tabla}/${id}/pagar`, { fecha: hoy() });
-      aviso(tipo === 'ingreso' ? 'Cobrado' : 'Pagado');
+      const ruta = tipo === 'venta' ? `/ventas/${id}/cobrar` : tipo === 'ingreso' ? `/ingresos/${id}/pagar` : `/gastos/${id}/pagar`;
+      await api('POST', ruta, { fecha: hoy() });
+      aviso(tipo === 'gasto' ? 'Pagado' : 'Cobrado');
       return render();
     }
     if (t.dataset.archivar) {
