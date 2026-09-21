@@ -278,6 +278,21 @@ const PASOS = [
       WHERE NOT EXISTS (SELECT 1 FROM abonos a WHERE a.tipo='gasto' AND a.doc_id = gastos.id)`);
     d.exec(`UPDATE gastos SET abonado = monto, estado = 'pagado', fecha_pago = COALESCE(fecha_pago, fecha)`);
   },
+
+  // v2: el estado de una venta se arrastra desde su ingreso ligado, pero
+  // solo cuando algo vuelve a tocar ese ingreso (un abono, una edición...).
+  // Las ventas que ya estaban cobradas antes de que existiera ese arrastre
+  // se quedaron congeladas en "por cobrar" para siempre. Se reconcilian
+  // una sola vez contra el estado real de su ingreso.
+  (d) => {
+    d.exec(`
+      UPDATE ventas SET estado = (
+        SELECT i.estado FROM ingresos i WHERE i.venta_id = ventas.id
+      )
+      WHERE EXISTS (
+        SELECT 1 FROM ingresos i WHERE i.venta_id = ventas.id AND i.estado <> ventas.estado
+      )`);
+  },
 ];
 
 function migrar() {
