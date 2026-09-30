@@ -241,7 +241,9 @@ function calcularDoc(entrada, previo) {
   const monto = baseCop + iva - rete;
   if (monto < 0) throw new Error('La retención no puede superar el total del documento');
 
-  return { base: baseCop, monto_origen: Math.round(origen), iva_pct, iva, rete_pct, rete, moneda, trm, monto };
+  // Con 2 decimales: un VPS de 5,49 USD no puede volverse 5 USD al editarlo.
+  const monto_origen = Math.round(origen * 100) / 100;
+  return { base: baseCop, monto_origen, iva_pct, iva, rete_pct, rete, moneda, trm, monto };
 }
 
 /* ------------------------------- abonos ---------------------------------- */
@@ -303,7 +305,6 @@ function abonar(req, tabla, id, datos) {
 // Aplica el estado pedido desde un formulario: "pagado" salda el documento,
 // "pendiente" deshace los abonos que tuviera.
 function aplicarEstadoPedido(req, tabla, id, pedido, datos) {
-  if (!pedido) return;
   const doc = leerDoc(tabla, id);
   if (!doc) return;
   if (pedido === 'pagado' && doc.abonado < doc.monto) {
@@ -492,6 +493,27 @@ function insertarFila(tabla, fila) {
   );
 }
 
+// El ingreso de una venta es quien manda en la plata: si lo editas, la venta
+// (total, precio, fecha, cliente, línea) lo sigue para que no se contradigan.
+function sincronizarVenta(ingresoId) {
+  const i = leerDoc('ingresos', ingresoId);
+  if (!i || !i.venta_id) return;
+  const v = db.prepare('SELECT * FROM ventas WHERE id = ?').get(i.venta_id);
+  if (!v) return;
+  const cantidad = v.cantidad || 1;
+  db.prepare(
+    `UPDATE ventas SET total = ?, precio_unitario = ?, fecha = ?, cliente_id = ?, linea_id = ?, metodo = ?, estado = ? WHERE id = ?`
+  ).run(i.monto, Math.round(i.base / cantidad), i.fecha, i.cliente_id, i.linea_id, i.metodo, i.estado, v.id);
+}
+
+// Un cambio de stock que no viene de una compra ni de una venta queda como ajuste.
+function registrarAjuste(productoId, delta, costo, fecha, nota) {
+  db.prepare(
+    `INSERT INTO movimientos (producto_id, fecha, tipo, cantidad, costo_unitario, nota, creado)
+     VALUES (?, ?, 'ajuste', ?, ?, ?, datetime('now'))`
+  ).run(productoId, fecha || hoy(), delta, costo || 0, nota);
+}
+
 /* ------------------------------ rutas CRUD ------------------------------- */
 
 for (const [tabla, def] of Object.entries(TABLAS)) {
@@ -540,6 +562,9 @@ for (const [tabla, def] of Object.entries(TABLAS)) {
           )
           .run(...cols.map((c) => valores[c]));
         const id = info.lastInsertRowid;
+        if (tabla === 'productos' && entero(valores.stock) > 0) {
+          registrarAjuste(id, entero(valores.stock), entero(valores.costo_unitario), null, 'Stock inicial');
+        }
         if (def.documento) {
           // Un documento nace sin abonos; el estado pedido decide si se salda.
           db.prepare(`UPDATE ${tabla} SET abonado = 0, estado = 'pendiente', fecha_pago = NULL WHERE id = ?`).run(id);
@@ -565,7 +590,14 @@ for (const [tabla, def] of Object.entries(TABLAS)) {
       const valores = { ...b };
       const tocaPlata = def.documento &&
         ['base', 'monto', 'iva_pct', 'rete_pct', 'moneda', 'trm'].some((k) => b[k] !== undefined);
-      if (tocaPlata) Object.assign(valores, calcularDoc(b, previo));
+      if (tocaPlata) {
+        Object.assign(valores, calcularDoc(b, previo));
+        if (valores.monto < previo.abonado) {
+          throw new Error(
+            `Ya hay abonos por $${previo.abonado.toLocaleString('es-CO')}; quita abonos antes de bajar el total a $${valores.monto.toLocaleString('es-CO')}.`
+          );
+        }
+      }
 
       const campos = def.campos.filter((c) => valores[c] !== undefined && c !== 'estado' && c !== 'fecha_pago');
       const extra = tocaPlata ? ['iva', 'rete', 'monto_origen'] : [];
@@ -580,6 +612,11 @@ for (const [tabla, def] of Object.entries(TABLAS)) {
           );
         }
         if (def.documento) aplicarEstadoPedido(req, tabla, id, b.estado, { ...previo, ...b });
+        if (tabla === 'ingresos' && previo.venta_id) sincronizarVenta(id);
+        if (tabla === 'productos' && b.stock !== undefined && b.stock !== '') {
+          const delta = entero(b.stock) - previo.stock;
+          if (delta) registrarAjuste(id, delta, previo.costo_unitario, b.fecha, 'Stock cambiado al editar el producto');
+        }
       });
       tx();
       const fila = db.prepare(`SELECT * FROM ${tabla} WHERE id = ?`).get(id);
@@ -605,6 +642,10 @@ for (const [tabla, def] of Object.entries(TABLAS)) {
             `Esa línea tiene ${usos} movimientos. Archívala en vez de borrarla para no cambiar los reportes de meses cerrados.`
           );
         }
+      }
+
+      if (tabla === 'ingresos' && fila.venta_id) {
+        throw new Error('Ese ingreso es de una venta: bórrala desde Ventas para que también devuelva el stock.');
       }
 
       const tx = db.transaction(() => {
@@ -712,11 +753,14 @@ app.post('/api/ventas/:id/cobrar', (req, res) =>
 
 const avanzar = (fecha, ciclo) => sumarMeses(fecha, ciclo === 'anual' ? 12 : 1);
 
+// Pone al día TODOS los periodos atrasados, no solo uno por corrida: si el
+// cron no corrió en tres meses, salen los tres cobros de una vez.
 function generarVencidas(req) {
-  const vencidas = db.prepare('SELECT * FROM suscripciones WHERE activa = 1 AND proxima_fecha <= ?').all(hoy());
+  const ahora = hoy();
+  const vencidas = db.prepare('SELECT * FROM suscripciones WHERE activa = 1 AND proxima_fecha <= ?').all(ahora);
   let generados = 0;
   const tx = db.transaction((lista) => {
-    for (const s of lista) {
+    for (const s of lista) for (; s.proxima_fecha <= ahora; s.proxima_fecha = avanzar(s.proxima_fecha, s.ciclo)) {
       const yaExiste = db
         .prepare('SELECT id FROM ingresos WHERE suscripcion_id = ? AND fecha = ?')
         .get(s.id, s.proxima_fecha);
@@ -738,10 +782,11 @@ function generarVencidas(req) {
 
 // El espejo: los gastos fijos que se repiten solos (VPS, dominios, APIs).
 function generarGastosVencidos(req) {
-  const vencidos = db.prepare('SELECT * FROM gastos_recurrentes WHERE activa = 1 AND proxima_fecha <= ?').all(hoy());
+  const ahora = hoy();
+  const vencidos = db.prepare('SELECT * FROM gastos_recurrentes WHERE activa = 1 AND proxima_fecha <= ?').all(ahora);
   let gastosGenerados = 0;
   const tx = db.transaction((lista) => {
-    for (const g of lista) {
+    for (const g of lista) for (; g.proxima_fecha <= ahora; g.proxima_fecha = avanzar(g.proxima_fecha, g.ciclo)) {
       const yaExiste = db
         .prepare('SELECT id FROM gastos WHERE recurrente_id = ? AND fecha = ?')
         .get(g.id, g.proxima_fecha);
@@ -784,7 +829,7 @@ function construirRecordatorios() {
     )
     .all()
     .map((r) => ({ ...r, dias: diasEntre(r.vence || r.fecha, ahora) }))
-    .filter((r) => r.dias > 0 || r.dias >= -ventana);
+    .filter((r) => r.dias >= -ventana);
 
   const pagar = db
     .prepare(
@@ -793,13 +838,17 @@ function construirRecordatorios() {
     )
     .all()
     .map((r) => ({ ...r, dias: diasEntre(r.vence || r.fecha, ahora) }))
-    .filter((r) => r.dias > 0 || r.dias >= -ventana);
+    .filter((r) => r.dias >= -ventana);
 
   if (!cobrar.length && !pagar.length) return null;
 
   const linea = (nombre, r) =>
     `• ${nombre || r.concepto} — ${r.concepto} — ${pesosTxt(r.saldo)} — ${
-      r.dias > 0 ? `vencida hace ${r.dias} día${r.dias === 1 ? '' : 's'}` : `vence en ${-r.dias} día${-r.dias === 1 ? '' : 's'}`
+      r.dias > 0
+        ? `vencida hace ${r.dias} día${r.dias === 1 ? '' : 's'}`
+        : r.dias === 0
+          ? 'vence hoy'
+          : `vence en ${-r.dias} día${-r.dias === 1 ? '' : 's'}`
     }`;
 
   const bloques = [];
@@ -838,7 +887,7 @@ function construirResumenAlDia() {
   const mes = mesDe(hoy());
   const t = totalesMes(mes);
   return [
-    '✅ Al día: nada pendiente por cobrar ni por pagar.',
+    `✅ Al día: nada vencido ni por vencer en los próximos ${diasAntes()} días.`,
     '',
     `${t.utilidad >= 0 ? '📈' : '📉'} Utilidad neta de ${mes}: ${pesosTxt(t.utilidad)}`,
     `Entró ${pesosTxt(t.ingresos)} · Salió ${pesosTxt(t.gastos)}`,
@@ -1069,6 +1118,14 @@ const sumaAbonos = (tipo, mes, extra = '') =>
     )
     .get(tipo, mes).t;
 
+// Agrega la fila "General" (movimientos sin línea) y el margen de cada una.
+function conGeneral(filas, general) {
+  const todas = [...filas, { id: null, nombre: 'General', tipo: 'general', color: '#5F6E67', por_cobrar: 0, por_pagar: 0, ...general }];
+  return todas
+    .map((r) => ({ ...r, margen: r.ingresos - r.gastos, pct: r.ingresos ? Math.round(((r.ingresos - r.gastos) / r.ingresos) * 100) : 0 }))
+    .sort((a, b) => b.ingresos - a.ingresos);
+}
+
 function totalesMes(mes) {
   const ingresos = sumaAbonos('ingreso', mes);
   const gastos = sumaAbonos('gasto', mes);
@@ -1098,17 +1155,30 @@ app.get('/api/reportes/panel', (req, res) =>
     const mesAnterior = mesMas(mes, -1);
     const ahora = hoy();
 
-    const porLinea = db
-      .prepare(
-        `SELECT l.id, l.nombre, l.color, l.tipo,
-            (SELECT COALESCE(SUM(a.monto),0) FROM abonos a JOIN ingresos i ON i.id = a.doc_id
-              WHERE a.tipo='ingreso' AND i.linea_id = l.id AND substr(a.fecha,1,7) = ?) AS ingresos,
-            (SELECT COALESCE(SUM(a.monto),0) FROM abonos a JOIN gastos g ON g.id = a.doc_id
-              WHERE a.tipo='gasto' AND g.linea_id = l.id AND substr(a.fecha,1,7) = ?) AS gastos
-         FROM lineas l WHERE l.activa = 1 ORDER BY ingresos DESC`
-      )
-      .all(mes, mes)
-      .map((r) => ({ ...r, margen: r.ingresos - r.gastos, pct: r.ingresos ? Math.round(((r.ingresos - r.gastos) / r.ingresos) * 100) : 0 }));
+    // Todas las líneas (también las archivadas que movieron plata) más
+    // "General", para que la suma cuadre con la utilidad del mes.
+    const porLinea = conGeneral(
+      db
+        .prepare(
+          `SELECT l.id, l.nombre, l.color, l.tipo,
+              (SELECT COALESCE(SUM(a.monto),0) FROM abonos a JOIN ingresos i ON i.id = a.doc_id
+                WHERE a.tipo='ingreso' AND i.linea_id = l.id AND substr(a.fecha,1,7) = ?) AS ingresos,
+              (SELECT COALESCE(SUM(a.monto),0) FROM abonos a JOIN gastos g ON g.id = a.doc_id
+                WHERE a.tipo='gasto' AND g.linea_id = l.id AND substr(a.fecha,1,7) = ?) AS gastos
+           FROM lineas l`
+        )
+        .all(mes, mes),
+      {
+        ingresos: db.prepare(
+          `SELECT COALESCE(SUM(a.monto),0) t FROM abonos a JOIN ingresos i ON i.id = a.doc_id
+           WHERE a.tipo='ingreso' AND i.linea_id IS NULL AND substr(a.fecha,1,7) = ?`
+        ).get(mes).t,
+        gastos: db.prepare(
+          `SELECT COALESCE(SUM(a.monto),0) t FROM abonos a JOIN gastos g ON g.id = a.doc_id
+           WHERE a.tipo='gasto' AND g.linea_id IS NULL AND substr(a.fecha,1,7) = ?`
+        ).get(mes).t,
+      }
+    );
 
     const cxc = db
       .prepare(
@@ -1117,10 +1187,10 @@ app.get('/api/reportes/panel', (req, res) =>
          FROM ingresos i
          LEFT JOIN clientes c ON c.id = i.cliente_id
          LEFT JOIN lineas l ON l.id = i.linea_id
-         WHERE i.estado <> 'pagado' ORDER BY i.fecha LIMIT 50`
+         WHERE i.estado <> 'pagado' ORDER BY COALESCE(i.vence, i.fecha) LIMIT 50`
       )
       .all()
-      .map((r) => ({ ...r, dias: diasEntre(r.fecha, ahora) }));
+      .map((r) => ({ ...r, dias: diasEntre(r.vence || r.fecha, ahora) }));
 
     const cxp = db
       .prepare(
@@ -1131,7 +1201,10 @@ app.get('/api/reportes/panel', (req, res) =>
          WHERE g.estado <> 'pagado' ORDER BY COALESCE(g.vence, g.fecha) LIMIT 50`
       )
       .all()
-      .map((r) => ({ ...r, dias: diasEntre(r.fecha, ahora) }));
+      .map((r) => ({ ...r, dias: diasEntre(r.vence || r.fecha, ahora) }));
+    // Los totales se suman sobre TODO lo pendiente, no solo las 50 filas que se listan.
+    const saldoPendiente = (tabla) =>
+      db.prepare(`SELECT COALESCE(SUM(monto - abonado),0) t FROM ${tabla} WHERE estado <> 'pagado'`).get().t;
 
     const gastosFijos = db
       .prepare(
@@ -1164,10 +1237,11 @@ app.get('/api/reportes/panel', (req, res) =>
       previo,
       porLinea,
       cxc,
-      cxcTotal: cxc.reduce((a, b) => a + b.saldo, 0),
+      cxcTotal: saldoPendiente('ingresos'),
       cxp,
-      cxpTotal: cxp.reduce((a, b) => a + b.saldo, 0),
+      cxpTotal: saldoPendiente('gastos'),
       gastosFijos,
+      fijosMes: gastosFijos.reduce((a, g) => a + g.monto, 0),
       mrr: Math.round(mrr),
       gastoFijoRecurrente: Math.round(gastoFijoRecurrente),
       serie,
@@ -1181,7 +1255,7 @@ app.get('/api/reportes/lineas', (req, res) =>
   ok(res, () => {
     const desde = req.query.desde || '0000-01-01';
     const hasta = req.query.hasta || '9999-12-31';
-    return db
+    const filas = db
       .prepare(
         `SELECT l.id, l.nombre, l.tipo, l.color,
             (SELECT COALESCE(SUM(a.monto),0) FROM abonos a JOIN ingresos i ON i.id = a.doc_id
@@ -1194,8 +1268,21 @@ app.get('/api/reportes/lineas', (req, res) =>
               WHERE g.linea_id = l.id AND g.estado <> 'pagado' AND g.fecha BETWEEN ? AND ?) AS por_pagar
          FROM lineas l ORDER BY ingresos DESC`
       )
-      .all(desde, hasta, desde, hasta, desde, hasta, desde, hasta)
-      .map((r) => ({ ...r, margen: r.ingresos - r.gastos, pct: r.ingresos ? Math.round(((r.ingresos - r.gastos) / r.ingresos) * 100) : 0 }));
+      .all(desde, hasta, desde, hasta, desde, hasta, desde, hasta);
+    const general = db
+      .prepare(
+        `SELECT
+            (SELECT COALESCE(SUM(a.monto),0) FROM abonos a JOIN ingresos i ON i.id = a.doc_id
+              WHERE a.tipo='ingreso' AND i.linea_id IS NULL AND a.fecha BETWEEN ? AND ?) AS ingresos,
+            (SELECT COALESCE(SUM(a.monto),0) FROM abonos a JOIN gastos g ON g.id = a.doc_id
+              WHERE a.tipo='gasto' AND g.linea_id IS NULL AND a.fecha BETWEEN ? AND ?) AS gastos,
+            (SELECT COALESCE(SUM(monto - abonado),0) FROM ingresos
+              WHERE linea_id IS NULL AND estado <> 'pagado' AND fecha BETWEEN ? AND ?) AS por_cobrar,
+            (SELECT COALESCE(SUM(monto - abonado),0) FROM gastos
+              WHERE linea_id IS NULL AND estado <> 'pagado' AND fecha BETWEEN ? AND ?) AS por_pagar`
+      )
+      .get(desde, hasta, desde, hasta, desde, hasta, desde, hasta);
+    return conGeneral(filas, general);
   })
 );
 
@@ -1219,6 +1306,7 @@ app.get('/api/reportes/productos', (req, res) =>
         `SELECT p.id, p.nombre, p.stock, p.costo_unitario, p.precio_venta,
             COALESCE(SUM(v.cantidad),0) AS vendidos,
             COALESCE(SUM(v.total),0) AS facturado,
+            COALESCE(SUM(v.precio_unitario * v.cantidad),0) AS vendido_base,
             COALESCE(SUM((v.precio_unitario - v.costo_unitario) * v.cantidad),0) AS margen
          FROM productos p LEFT JOIN ventas v ON v.producto_id = p.id
          GROUP BY p.id ORDER BY facturado DESC`

@@ -46,7 +46,7 @@ function enlaceRecordatorioWhatsapp(c) {
   const numero = telefonoWhatsapp(c.telefono);
   if (!numero) return '';
   const dias = diasEntre(c.vence || c.fecha, hoy());
-  const vencimiento = dias > 0 ? `hace ${dias} día${dias === 1 ? '' : 's'}` : `en ${-dias} día${-dias === 1 ? '' : 's'}`;
+  const vencimiento = dias > 0 ? `hace ${dias} día${dias === 1 ? '' : 's'}` : dias === 0 ? 'hoy' : `en ${-dias} día${-dias === 1 ? '' : 's'}`;
   const verbo = dias > 0 ? 'venció' : 'vence';
   const mensaje =
     `Hola ${c.cliente || ''}, te escribo de Code Repair Tech para recordarte el pago pendiente de ` +
@@ -152,7 +152,7 @@ const CICLOS = [{ v: 'mensual', t: 'Mensual' }, { v: 'anual', t: 'Anual' }];
 -------------------------------------------------------------------------- */
 
 const camposFiscales = () => [
-  { k: 'base', l: 'Base (antes de IVA)', t: 'number', req: true },
+  { k: 'base', l: 'Base (antes de IVA)', t: 'number', req: true, paso: 'any' },
   { k: 'iva_pct', l: 'IVA', t: 'select', opts: () => IVAS, def: 0 },
   { k: 'rete_pct', l: 'Retención %', t: 'number', def: 0, paso: '0.1' },
   { k: 'moneda', l: 'Moneda', t: 'select', opts: () => MONEDAS, def: 'COP' },
@@ -189,7 +189,7 @@ const FORMULARIOS = {
     { k: 'cliente_id', l: 'Cliente', t: 'select', opts: opcionesCliente },
     { k: 'metodo', l: 'Método', t: 'select', opts: () => METODOS, def: 'nequi' },
     { k: 'estado', l: 'Estado', t: 'select', opts: () => [{ v: 'pagado', t: 'Ya me lo pagaron' }, { v: 'pendiente', t: 'Por cobrar' }], def: 'pagado' },
-    { k: 'vence', l: 'Vence el', t: 'date', soloSi: (d) => d.estado === 'pendiente' },
+    { k: 'vence', l: 'Vence el', t: 'date', soloSi: (d) => d.estado !== 'pagado' },
     { k: 'notas', l: 'Notas', t: 'text', ancho: true },
   ],
   gastos: () => [
@@ -201,7 +201,7 @@ const FORMULARIOS = {
     { k: 'linea_id', l: 'Línea', t: 'select', opts: opcionesLinea },
     { k: 'metodo', l: 'Método', t: 'select', opts: () => METODOS, def: 'nequi' },
     { k: 'estado', l: 'Estado', t: 'select', opts: () => [{ v: 'pagado', t: 'Ya lo pagué' }, { v: 'pendiente', t: 'Lo debo' }], def: 'pagado' },
-    { k: 'vence', l: 'Vence el', t: 'date', soloSi: (d) => d.estado === 'pendiente' },
+    { k: 'vence', l: 'Vence el', t: 'date', soloSi: (d) => d.estado !== 'pagado' },
     { k: 'proveedor', l: 'Proveedor', t: 'text', ancho: true },
   ],
   suscripciones: () => [
@@ -218,7 +218,7 @@ const FORMULARIOS = {
   ],
   gastos_recurrentes: () => [
     { k: 'concepto', l: 'Concepto', t: 'text', req: true, ancho: true },
-    { k: 'monto', l: 'Monto (base)', t: 'number', req: true },
+    { k: 'monto', l: 'Monto (base)', t: 'number', req: true, paso: 'any' },
     { k: 'moneda', l: 'Moneda', t: 'select', opts: () => MONEDAS, def: 'COP' },
     { k: 'trm', l: 'TRM (pesos por unidad)', t: 'number', def: 1, soloSi: (d) => d.moneda && d.moneda !== 'COP' },
     { k: 'iva_pct', l: 'IVA', t: 'select', opts: () => IVAS, def: 0 },
@@ -380,12 +380,26 @@ async function editar(tabla, id) {
   // Una sola fila, no la tabla entera.
   const fila = await api('GET', `/${tabla}/${id}`);
   if (fila.monto_origen !== undefined && fila.moneda && fila.moneda !== 'COP') fila.base = fila.monto_origen;
+  const campos = FORMULARIOS[tabla]();
+  // Un documento abonado tiene que poder guardarse tal cual. Sin esta opción
+  // el selector caía en "pagado" y al guardar se saldaba solo.
+  const campoEstado = campos.find((c) => c.k === 'estado');
+  if (campoEstado && fila.estado === 'parcial') {
+    const base = campoEstado.opts();
+    campoEstado.opts = () => [{ v: 'parcial', t: `Abonado (${pesos(fila.abonado)} de ${pesos(fila.monto)})` }, ...base];
+  }
   abrirFormulario({
     titulo: 'Editar',
-    campos: FORMULARIOS[tabla](),
+    campos,
     valores: fila,
     resumen: RESUMEN_FORM[tabla],
-    alGuardar: (d) => api('PUT', `/${tabla}/${id}`, d),
+    alGuardar: (d) => {
+      if (fila.abonado > 0 && d.estado === 'pendiente' &&
+          !confirm(`Marcarlo como pendiente borra los abonos ya registrados (${pesos(fila.abonado)}). ¿Seguir?`)) {
+        throw new Error('No se guardó.');
+      }
+      return api('PUT', `/${tabla}/${id}`, d);
+    },
   });
 }
 
@@ -558,7 +572,9 @@ async function vistaPanel() {
     return `<div class="fila">
       <span class="fila-principal">${esc(c.cliente || c.proveedor || c.concepto)}</span>
       <span class="fila-monto num">${pesos(c.saldo)}</span>
-      <span class="fila-detalle">${esc(c.linea || 'General')} · ${c.dias} días · ${esc(c.fecha)}${
+      <span class="fila-detalle">${esc(c.linea || 'General')} · ${
+        c.dias > 0 ? `vencido hace ${c.dias} d` : c.dias === 0 ? 'vence hoy' : `vence en ${-c.dias} d`
+      } · ${esc(c.fecha)}${
         c.abonado ? ` · abonado ${pesos(c.abonado)} de ${pesos(c.monto)}` : ''
       } ${c.estado === 'parcial' ? marcaEstado('parcial') : ''}</span>
       <span class="fila-acciones">
@@ -628,7 +644,7 @@ async function vistaPanel() {
     </p>
 
     <div class="bloque">
-      <div class="bloque-titulo"><h2>Gastos fijos del mes</h2><strong class="num">${pesos(u.fijos)}</strong></div>
+      <div class="bloque-titulo"><h2>Gastos fijos del mes</h2><strong class="num">${pesos(d.fijosMes)}</strong></div>
       <div class="filas">${fijosHtml}</div>
       <p class="sub num" style="margin-top:12px">Entra fijo ${pesos(d.mrr)}/mes · sale fijo ${pesos(d.gastoFijoRecurrente)}/mes${
         d.puntoEquilibrio ? ` · necesitas vender ${pesos(d.puntoEquilibrio)} para no perder` : ''
@@ -652,6 +668,7 @@ async function vistaIngresos() {
     <div class="bloque">
       <div class="bloque-titulo"><h2>Ingresos de ${esc(nombreMes(estado.mes))}</h2><strong class="num monto-positivo">${pesos(cobrado)}</strong></div>
       <p class="sub num">Cobrado ${pesos(cobrado)} · por cobrar ${pesos(porCobrar)} · facturado ${pesos(cobrado + porCobrar)}</p>
+      <p class="sub">Documentos con fecha de este mes. El Panel cuenta por la fecha en que se movió la plata.</p>
       <div class="filas">${
         filas.length
           ? filas
@@ -681,13 +698,15 @@ async function vistaIngresos() {
 async function vistaGastos() {
   const filas = await api('GET', '/gastos?' + consulta());
   const total = filas.reduce((a, b) => a + b.monto, 0);
+  const pagado = filas.reduce((a, b) => a + b.abonado, 0);
   const fijos = filas.filter((f) => f.tipo === 'fijo').reduce((a, b) => a + b.monto, 0);
-  const debes = filas.reduce((a, b) => a + (b.monto - b.abonado), 0);
+  const debes = total - pagado;
   return `
     ${filtrosHtml({ estados: [{ v: 'pagado', t: 'Pagados' }, { v: 'parcial', t: 'Abonados' }, { v: 'pendiente', t: 'Por pagar' }] })}
     <div class="bloque">
-      <div class="bloque-titulo"><h2>Gastos de ${esc(nombreMes(estado.mes))}</h2><strong class="num monto-negativo">${pesos(total)}</strong></div>
-      <p class="sub num">Fijos ${pesos(fijos)} · variables ${pesos(total - fijos)} · sin pagar ${pesos(debes)}</p>
+      <div class="bloque-titulo"><h2>Gastos de ${esc(nombreMes(estado.mes))}</h2><strong class="num monto-negativo">${pesos(pagado)}</strong></div>
+      <p class="sub num">Pagado ${pesos(pagado)} · por pagar ${pesos(debes)} · facturado ${pesos(total)} · fijos ${pesos(fijos)} · variables ${pesos(total - fijos)}</p>
+      <p class="sub">Documentos con fecha de este mes. El Panel cuenta por la fecha en que se movió la plata.</p>
       <div class="filas">${
         filas.length
           ? filas
@@ -782,13 +801,15 @@ async function vistaRecurrentes() {
 async function vistaVentas() {
   const filas = await api('GET', '/ventas?' + consulta());
   const total = filas.reduce((a, b) => a + b.total, 0);
+  // La utilidad se mide sin IVA ni retención: el IVA no es tuyo, es de la DIAN.
+  const vendido = filas.reduce((a, b) => a + b.precio_unitario * b.cantidad, 0);
   const costoTotal = filas.reduce((a, b) => a + b.costo_unitario * b.cantidad, 0);
-  const margen = total - costoTotal;
+  const margen = vendido - costoTotal;
   return `
     ${filtrosHtml({ buscar: false, estados: [{ v: 'pagado', t: 'Pagadas' }, { v: 'parcial', t: 'Abonadas' }, { v: 'pendiente', t: 'Por cobrar' }] })}
     <div class="bloque">
       <div class="bloque-titulo"><h2>Ventas de ${esc(nombreMes(estado.mes))}</h2><strong class="num">${pesos(total)}</strong></div>
-      <p class="sub num">Costo ${pesos(costoTotal)} · Utilidad <b class="${margen >= 0 ? 'monto-positivo' : 'monto-negativo'}">${pesos(margen)}</b>${total ? ` · margen ${pct1((margen / total) * 100)}% sobre venta` : ''}</p>
+      <p class="sub num">Costo ${pesos(costoTotal)} · Utilidad <b class="${margen >= 0 ? 'monto-positivo' : 'monto-negativo'}">${pesos(margen)}</b>${vendido ? ` · margen ${pct1((margen / vendido) * 100)}% sobre venta` : ''}</p>
       <div class="filtros"><button class="btn-linea" id="btn-venta">Registrar venta</button></div>
       <div class="filas">${
         filas.length
@@ -858,7 +879,7 @@ async function vistaInventario() {
               .map(
                 (m) => `<div class="fila fila-compacta">
                   <span class="fila-principal">${esc(m.producto || 'producto borrado')}</span>
-                  <span class="fila-monto num">${signo[m.tipo] || ''}${Math.abs(m.cantidad)} <span class="sub">u.</span></span>
+                  <span class="fila-monto num">${m.tipo === 'ajuste' ? (m.cantidad >= 0 ? '+' : '−') : signo[m.tipo] || ''}${Math.abs(m.cantidad)} <span class="sub">u.</span></span>
                   <span class="fila-detalle">${esc(m.fecha)} · ${esc(m.tipo)} · costo ${pesos(m.costo_unitario)}${m.nota ? ' · ' + esc(m.nota) : ''}${
                     m.venta_id ? ` · venta #${m.venta_id}` : ''
                   }${m.gasto_id ? ` · gasto #${m.gasto_id}` : ''}</span>
@@ -1000,7 +1021,7 @@ async function vistaReportes() {
               .map(
                 (p) => `<div class="fila"><span class="fila-principal">${esc(p.nombre)}</span>
                   <span class="fila-monto num">${pesos(p.facturado)}</span>
-                  <span class="fila-detalle num">${p.vendidos} vendidos · margen ${pesos(p.margen)}${p.facturado ? ` (${pct1((p.margen / p.facturado) * 100)}%)` : ''} · quedan ${p.stock}</span></div>`
+                  <span class="fila-detalle num">${p.vendidos} vendidos · margen ${pesos(p.margen)}${p.vendido_base ? ` (${pct1((p.margen / p.vendido_base) * 100)}%)` : ''} · quedan ${p.stock}</span></div>`
               )
               .join('')
           : '<p class="vacio">Sin productos registrados.</p>'
@@ -1009,7 +1030,7 @@ async function vistaReportes() {
 
     <div class="bloque">
       <div class="bloque-titulo"><h2>Descargar datos</h2></div>
-      <p class="sub">Los CSV salen con los filtros de mes y línea que tengas puestos. El respaldo completo se lo puedes volver a cargar al sistema.</p>
+      <p class="sub">Los CSV salen del mes que tengas puesto. El respaldo completo se lo puedes volver a cargar al sistema.</p>
       <div class="filtros">
         ${['ingresos', 'gastos', 'abonos', 'ventas', 'movimientos', 'clientes', 'suscripciones', 'gastos_recurrentes', 'productos', 'bitacora']
           .map((t) => `<a class="btn-linea" href="/api/export/${t}.csv?${consulta()}" download>${t}.csv</a>`)
@@ -1457,7 +1478,11 @@ pintarConexion();
 
 window.addEventListener('hashchange', () => {
   const v = location.hash.slice(1);
-  estado.vista = VISTA_FN[v] ? v : 'panel';
+  const nueva = VISTA_FN[v] ? v : 'panel';
+  // Cada vista arranca sin filtros: si no, una búsqueda hecha en Ingresos
+  // seguía filtrando Ventas (donde no hay buscador) sin que se viera.
+  if (nueva !== estado.vista) estado.filtro = { linea_id: '', estado: '', q: '', producto_id: '', categoria: '' };
+  estado.vista = nueva;
   render.animar = true;
   render();
 });

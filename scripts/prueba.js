@@ -152,6 +152,66 @@ async function esperar() {
   ok('reporte de cartera por antigüedad', !!(await api('GET', '/api/reportes/cartera')).data.porCobrar);
   ok('bitácora registra lo hecho', (await api('GET', '/api/bitacora')).data.length > 5);
 
+  console.log('\n== auditoría: coherencia entre funciones ==');
+  // Editar un documento sin mandar "estado" igual recalcula su estado.
+  const docE = (await api('POST', '/api/ingresos', { fecha: '2026-07-01', concepto: 'Editar sin estado', base: 100000 })).data;
+  eq('nace pagado', docE.estado, 'pagado');
+  const subir = await api('PUT', `/api/ingresos/${docE.id}`, { base: 150000 });
+  eq('subir el monto sin mandar estado lo deja abonado', subir.data.estado, 'parcial');
+  const bajar = await api('PUT', `/api/ingresos/${docE.id}`, { base: 50000 });
+  eq('no deja bajar el total por debajo de lo ya abonado', bajar.estado, 400);
+
+  // Centavos de dólar: editar solo el concepto no puede cambiar la plata.
+  const usd = (await api('POST', '/api/gastos', { fecha: '2026-07-02', concepto: 'API', base: 5.49, moneda: 'USD', trm: 4000 })).data;
+  eq('5,49 USD a 4000', usd.monto, 21960);
+  const usdForm = (await api('GET', `/api/gastos/${usd.id}`)).data;
+  const usdEd = (await api('PUT', `/api/gastos/${usd.id}`, { concepto: 'API renombrada', base: usdForm.monto_origen, moneda: 'USD', trm: 4000, estado: 'pagado' })).data;
+  eq('editar el concepto no se come los centavos', usdEd.monto, 21960);
+
+  // Ingreso de una venta: se edita en sincronía y no se borra suelto.
+  const prod2 = (await api('POST', '/api/productos', { nombre: 'Standee', costo_unitario: 10000, precio_venta: 30000, stock: 4 })).data;
+  const v2 = (await api('POST', '/api/ventas/registrar', { fecha: '2026-07-03', producto_id: prod2.id, cantidad: 2, iva_pct: 19 })).data;
+  const ingV2 = (await api('GET', '/api/ingresos?limit=2000')).data.find((i) => i.venta_id === v2.id);
+  eq('borrar el ingreso de una venta se rechaza', (await api('DELETE', `/api/ingresos/${ingV2.id}`)).estado, 400);
+  await api('PUT', `/api/ingresos/${ingV2.id}`, { base: 70000, estado: 'pagado' });
+  const v2b = (await api('GET', `/api/ventas/${v2.id}`)).data;
+  eq('editar el ingreso actualiza el total de la venta', v2b.total, 83300);
+  eq('...y su precio unitario', v2b.precio_unitario, 35000);
+  const repP = (await api('GET', '/api/reportes/productos')).data.find((p) => p.id === prod2.id);
+  eq('el margen del producto no cuenta el IVA como ganancia', repP.margen, 50000);
+  eq('...y se compara contra la venta sin IVA', repP.vendido_base, 70000);
+
+  // Productos: tocar el stock desde "Editar" deja rastro en el kardex.
+  await api('PUT', `/api/productos/${prod2.id}`, { stock: 9 });
+  const kx = (await api('GET', `/api/movimientos?producto_id=${prod2.id}`)).data;
+  ok('editar el stock deja un ajuste en el kardex', kx.some((m) => m.tipo === 'ajuste' && m.cantidad === 7), JSON.stringify(kx));
+  ok('el stock inicial queda en el kardex', kx.some((m) => m.tipo === 'ajuste' && m.cantidad === 4), JSON.stringify(kx));
+
+  // Generar vencidos pone al día todos los periodos atrasados de una vez.
+  const hoyS = (await api('GET', '/api/yo')).data.hoy;
+  const [ay, am] = hoyS.split('-').map(Number);
+  const hace3 = new Date(Date.UTC(ay, am - 1 - 3, 1)).toISOString().slice(0, 10);
+  const sus = (await api('POST', '/api/suscripciones', { concepto: 'Mensualidad atrasada', monto: 10000, ciclo: 'mensual', proxima_fecha: hace3 })).data;
+  const g1 = (await api('POST', '/api/suscripciones/generar-vencidas')).data;
+  ok('genera todos los meses atrasados de una', g1.generados >= 4, JSON.stringify(g1));
+  const susDes = (await api('GET', `/api/suscripciones/${sus.id}`)).data;
+  ok('...y deja la próxima fecha en el futuro', susDes.proxima_fecha > hoyS, susDes.proxima_fecha);
+
+  // Totales del panel = totales de la cartera, aunque haya más de 50 pendientes.
+  for (let i = 0; i < 55; i++) {
+    await api('POST', '/api/ingresos', { fecha: '2026-07-05', concepto: 'pend ' + i, base: 1000, estado: 'pendiente' });
+  }
+  const pan = (await api('GET', '/api/reportes/panel?mes=2026-07')).data;
+  const car = (await api('GET', '/api/reportes/cartera')).data;
+  eq('"Quién te debe" del panel = cartera', pan.cxcTotal, car.porCobrar.total);
+  eq('"Lo que debes" del panel = cartera', pan.cxpTotal, car.porPagar.total);
+
+  // Rentabilidad por línea suma lo mismo que la utilidad del mes.
+  const sumaLineas = pan.porLinea.reduce((a, l) => a + l.margen, 0);
+  eq('las líneas (con General) suman la utilidad', sumaLineas, pan.actual.utilidad);
+  const fijosLista = pan.gastosFijos.reduce((a, g) => a + g.monto, 0);
+  eq('"Gastos fijos del mes" suma su propia lista', pan.fijosMes, fijosLista);
+
   console.log('\n== backup y restauración ==');
   const bk = (await api('GET', '/api/backup')).data;
   ok('el backup incluye movimientos', Array.isArray(bk.datos.movimientos));
